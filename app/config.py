@@ -53,9 +53,15 @@ class Settings:
     excerpt_chars: int = _int("EXCERPT_CHARS", 2400)
     trace_max_days: int = _int("TRACE_MAX_DAYS", 120)
 
-    # Shared secret required on ingestion endpoints (X-API-Key header). Empty
-    # disables the check - fine locally, not in production.
+    # Shared secret for ingestion scripts (X-API-Key header). Empty means
+    # scripts can't ingest; the admin panel still can, with a sign-in.
     ingest_api_key: str = os.environ.get("INGEST_API_KEY", "").strip()
+
+    # Admin panel sign-in (see app/auth.py): the Firebase project whose ID
+    # tokens the panel sends - not a secret, it's the `aud` every token from
+    # that project carries - and the email domain that counts as internal.
+    firebase_project_id: str = os.environ.get("FIREBASE_PROJECT_ID", "").strip()
+    admin_email_domain: str = os.environ.get("ADMIN_EMAIL_DOMAIN", "apokryfon.com").strip().lstrip("@")
 
     # Origins allowed to call this API from a browser (comma-separated).
     # Defaults cover the Précis Vite dev server. Each entry is trimmed and has

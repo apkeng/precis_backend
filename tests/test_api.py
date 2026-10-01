@@ -1,6 +1,6 @@
 from app import store
 from app.config import settings
-from tests.conftest import ingest
+from tests.conftest import KEY_HEADERS, ingest
 
 SEP = {"from": "2026-09-01", "to": "2026-09-30"}
 
@@ -184,11 +184,14 @@ def test_event_quiz_is_cached(client, fake_claude):
     assert len(fake_claude.calls) == calls
 
 
-def test_ingest_key_is_enforced_when_set(client, fake_claude, monkeypatch):
-    monkeypatch.setattr(settings, "ingest_api_key", "secret")
+def test_ingest_needs_the_key(client, fake_claude, monkeypatch):
     body = {"paper": "P", "date": "2026-09-28", "title": "T", "text": "Cyclone text."}
     assert client.post("/clippings", json=body).status_code == 401
-    assert client.post("/clippings", json=body, headers={"X-API-Key": "secret"}).status_code == 202
+    assert client.post("/clippings", json=body, headers={"X-API-Key": "wrong"}).status_code == 401
+    assert client.post("/clippings", json=body, headers=KEY_HEADERS).status_code == 202
+    # No key configured: scripts can't ingest at all.
+    monkeypatch.setattr(settings, "ingest_api_key", "")
+    assert client.post("/clippings", json=body, headers={"X-API-Key": ""}).status_code == 401
 
 
 def test_pdf_ingest_reads_text(client, fake_claude, monkeypatch):
@@ -199,6 +202,7 @@ def test_pdf_ingest_reads_text(client, fake_claude, monkeypatch):
         "/clippings/pdf",
         files={"file": ("c.pdf", b"%PDF-1.4 fake", "application/pdf")},
         data={"paper": "The Courier", "date": "2026-09-28", "title": "Cyclone"},
+        headers=KEY_HEADERS,
     )
     assert resp.status_code == 202, resp.text
     clipping = store.get_clipping(resp.json()["id"])

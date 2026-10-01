@@ -1,5 +1,6 @@
 from app import editions, store
 from app.text_cleanup import clean_extracted_text
+from tests.conftest import KEY_HEADERS
 
 
 def test_clean_extracted_text_repairs_ligatures_and_hyphenation():
@@ -18,11 +19,12 @@ def test_edition_is_split_into_articles_and_ingested(client, fake_claude, monkey
         "/editions/pdf",
         files={"file": ("paper.pdf", b"%PDF-1.4 fake", "application/pdf")},
         data={"paper": "The Hindu", "date": "2026-10-01"},
+        headers=KEY_HEADERS,
     )
     assert resp.status_code == 202, resp.text
     edition_id = resp.json()["id"]
 
-    body = client.get(f"/editions/{edition_id}").json()
+    body = client.get(f"/editions/{edition_id}", headers=KEY_HEADERS).json()
     assert body["status"] == "ready"
     assert body["pages"] == 3
     assert body["pagesDone"] == 3
@@ -48,6 +50,7 @@ def test_edition_page_failure_is_recorded_and_others_continue(client, fake_claud
         "/editions/pdf",
         files={"file": ("paper.pdf", b"%PDF", "application/pdf")},
         data={"paper": "The Hindu", "date": "2026-10-01"},
+        headers=KEY_HEADERS,
     )
     edition = store.get_edition(resp.json()["id"])
     assert edition.status == "ready"
@@ -55,4 +58,5 @@ def test_edition_page_failure_is_recorded_and_others_continue(client, fake_claud
 
 
 def test_unknown_edition_is_404(client):
-    assert client.get("/editions/nope").status_code == 404
+    assert client.get("/editions/nope", headers=KEY_HEADERS).status_code == 404
+    assert client.get("/editions/nope").status_code == 401

@@ -9,6 +9,10 @@ from app import analysis, ingestion, quiz, store, vector_store
 from app.config import settings
 
 
+INGEST_KEY = "test-ingest-key"
+KEY_HEADERS = {"X-API-Key": INGEST_KEY}
+
+
 class _FakeEmbeddingFunction(EmbeddingFunction):
     """Deterministic, dependency-free stand-in for the real sentence-transformers
     embedder, so tests don't need to download a model. Texts sharing words get
@@ -104,7 +108,9 @@ class FakeClaude:
 def isolated_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "chroma_persist_dir", str(tmp_path / "chroma"))
     monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "precis.db"))
-    monkeypatch.setattr(settings, "ingest_api_key", "")
+    monkeypatch.setattr(settings, "ingest_api_key", INGEST_KEY)
+    monkeypatch.setattr(settings, "firebase_project_id", "precis-test")
+    monkeypatch.setattr(settings, "admin_email_domain", "apokryfon.com")
     monkeypatch.setattr(vector_store, "_embedding_fn", _FakeEmbeddingFunction())
     vector_store._client = None
     yield
@@ -131,7 +137,23 @@ def ingest(client, **overrides):
         "text": "The cyclone crossed the Odisha coast near Paradip. Three lakh people were evacuated.",
         **overrides,
     }
-    resp = client.post("/clippings", json=body)
+    resp = client.post("/clippings", json=body, headers=KEY_HEADERS)
     assert resp.status_code == 202, resp.text
     # TestClient runs background tasks before returning.
     return store.get_clipping(resp.json()["id"])
+
+
+@pytest.fixture
+def signed_in(monkeypatch):
+    """Accept any bearer token whose text is an email, as that verified user.
+    Returns the Authorization headers for an email."""
+    from app import auth
+
+    def fake_verify(token):
+        if token == "expired":
+            raise ValueError("Invalid or expired sign-in token: expired")
+        email, _, flag = token.partition("|")
+        return {"sub": "uid-" + email, "email": email, "email_verified": flag != "unverified"}
+
+    monkeypatch.setattr(auth, "verify_firebase_token", fake_verify)
+    return lambda token: {"Authorization": f"Bearer {token}"}

@@ -6,11 +6,12 @@ from __future__ import annotations
 import re
 from datetime import date
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app import analysis, quiz, store
+from app.auth import Caller, require_admin, require_ingest_access
 from app.config import settings
 from app.editions import process_edition
 from app.ingestion import process_clipping
@@ -18,6 +19,9 @@ from app.llm import LLMGenerationError, SchemaValidationError
 from app.pdf_processor import extract_text_by_page
 from app.text_cleanup import clean_extracted_text
 from app.schemas import (
+    AdminArticles,
+    AdminEditions,
+    AdminMe,
     AskIn,
     AskResponse,
     ClippingIn,
@@ -60,11 +64,6 @@ def llm_error_handler(_request, exc: Exception) -> JSONResponse:
 @app.exception_handler(ValueError)
 def value_error_handler(_request, exc: ValueError) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": str(exc)})
-
-
-def require_ingest_key(x_api_key: str | None = Header(default=None)) -> None:
-    if settings.ingest_api_key and x_api_key != settings.ingest_api_key:
-        raise HTTPException(status_code=401, detail="Missing or wrong X-API-Key.")
 
 
 def _date_param(value: str, name: str) -> str:
@@ -135,7 +134,7 @@ def _clipping_out(c: store.Clipping) -> ClippingOut:
     )
 
 
-@app.post("/clippings", response_model=ClippingOut, status_code=202, dependencies=[Depends(require_ingest_key)])
+@app.post("/clippings", response_model=ClippingOut, status_code=202, dependencies=[Depends(require_ingest_access)])
 def ingest_clipping(body: ClippingIn, background_tasks: BackgroundTasks) -> ClippingOut:
     clipping = store.create_clipping(body.paper, body.date, body.page, body.title, body.text)
     background_tasks.add_task(process_clipping, clipping.id)
@@ -153,7 +152,7 @@ def _ingest_pdf(clipping_id: str, pdf_bytes: bytes) -> None:
 
 
 @app.post(
-    "/clippings/pdf", response_model=ClippingOut, status_code=202, dependencies=[Depends(require_ingest_key)]
+    "/clippings/pdf", response_model=ClippingOut, status_code=202, dependencies=[Depends(require_ingest_access)]
 )
 async def ingest_clipping_pdf(
     background_tasks: BackgroundTasks,
@@ -187,12 +186,13 @@ def _edition_out(edition: store.Edition) -> EditionOut:
     )
 
 
-@app.post("/editions/pdf", response_model=EditionOut, status_code=202, dependencies=[Depends(require_ingest_key)])
+@app.post("/editions/pdf", response_model=EditionOut, status_code=202)
 async def ingest_edition(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="A whole day's e-paper PDF."),
     paper: str = Form(..., min_length=1),
     date_: str = Form(..., alias="date"),
+    caller: Caller = Depends(require_ingest_access),
 ) -> EditionOut:
     """Split every page into articles and ingest each one. Poll
     GET /editions/{id} for progress - a full edition takes a few minutes."""
@@ -200,17 +200,44 @@ async def ingest_edition(
         raise HTTPException(status_code=400, detail="Uploaded file must be a PDF.")
     _date_param(date_, "date")
     pdf_bytes = await file.read()
-    edition = store.create_edition(paper, date_)
+    edition = store.create_edition(paper.strip(), date_, uploaded_by=caller.label)
     background_tasks.add_task(process_edition, edition.id, pdf_bytes)
     return _edition_out(edition)
 
 
-@app.get("/editions/{edition_id}", response_model=EditionOut)
-def get_edition(edition_id: str) -> EditionOut:
+def _edition_or_404(edition_id: str) -> store.Edition:
     try:
-        return _edition_out(store.get_edition(edition_id))
+        return store.get_edition(edition_id)
     except store.NotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"No edition with id {edition_id!r}.") from exc
+
+
+@app.get("/editions/{edition_id}", response_model=EditionOut, dependencies=[Depends(require_ingest_access)])
+def get_edition(edition_id: str) -> EditionOut:
+    return _edition_out(_edition_or_404(edition_id))
+
+
+# --- Admin panel (internal users only) ---------------------------------------
+
+
+@app.get("/admin/me", response_model=AdminMe)
+def admin_me(caller: Caller = Depends(require_admin)) -> AdminMe:
+    return AdminMe(email=caller.label)
+
+
+@app.get("/admin/editions", response_model=AdminEditions, dependencies=[Depends(require_admin)])
+def admin_editions(limit: int = Query(default=50, ge=1, le=200)) -> AdminEditions:
+    return AdminEditions(
+        editions=[_edition_out(e) for e in store.list_editions(limit)], papers=store.known_papers()
+    )
+
+
+@app.get(
+    "/admin/editions/{edition_id}/articles", response_model=AdminArticles, dependencies=[Depends(require_admin)]
+)
+def admin_edition_articles(edition_id: str) -> AdminArticles:
+    _edition_or_404(edition_id)
+    return AdminArticles(articles=store.edition_clippings(edition_id))
 
 
 # --- Reading -----------------------------------------------------------------

@@ -20,6 +20,10 @@ from datetime import datetime, timezone
 
 from app.config import settings
 
+# Columns added after a table first shipped: CREATE TABLE IF NOT EXISTS
+# leaves an existing table alone, so these are added to older databases.
+_ADDED_COLUMNS = [("editions", "uploaded_by", "TEXT")]
+
 # Per-event caches, cleared whenever a new clipping joins the event so the
 # next read regenerates them from the fuller set of sources.
 EVENT_CACHE_FIELDS = ("analysis", "framing", "quiz")
@@ -62,8 +66,10 @@ CREATE TABLE IF NOT EXISTS editions (
     pages_done INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     error TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    uploaded_by TEXT
 );
+CREATE INDEX IF NOT EXISTS editions_created ON editions(created_at);
 
 CREATE TABLE IF NOT EXISTS event_links (
     a TEXT NOT NULL,
@@ -104,6 +110,7 @@ class Edition:
     status: str
     error: str | None
     created_at: str
+    uploaded_by: str | None = None
 
 
 @dataclass
@@ -137,6 +144,10 @@ def _conn():
     try:
         if path not in _initialized_paths:
             conn.executescript(_SCHEMA)
+            for table, column, kind in _ADDED_COLUMNS:
+                existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
             _initialized_paths.add(path)
         yield conn
         conn.commit()
@@ -260,17 +271,36 @@ def daily_counts(event_ids: list[str], date_from: str, date_to: str) -> dict[str
 # --- Editions ----------------------------------------------------------------
 
 
-def create_edition(paper: str, date: str) -> Edition:
+def create_edition(paper: str, date: str, uploaded_by: str | None = None) -> Edition:
     edition = Edition(
         id=uuid.uuid4().hex, paper=paper, date=date, pages=0, pages_done=0,
-        status="processing", error=None, created_at=_now(),
+        status="processing", error=None, created_at=_now(), uploaded_by=uploaded_by,
     )
     with _conn() as c:
         c.execute(
-            "INSERT INTO editions VALUES (?,?,?,?,?,?,?,?)",
-            (edition.id, paper, date, 0, 0, "processing", None, edition.created_at),
+            "INSERT INTO editions (id, paper, date, status, created_at, uploaded_by) VALUES (?,?,?,?,?,?)",
+            (edition.id, paper, date, "processing", edition.created_at, uploaded_by),
         )
     return edition
+
+
+def list_editions(limit: int = 50) -> list[Edition]:
+    """Most recently uploaded first."""
+    with _conn() as c:
+        rows = c.execute("SELECT * FROM editions ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return [Edition(**{k: r[k] for k in r.keys()}) for r in rows]
+
+
+def edition_clippings(edition_id: str) -> list[dict]:
+    """An edition's articles in page order, with the event each was filed under."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT c.id, c.page, c.title, c.status, c.error, c.event_id, e.title AS event_title "
+            "FROM clippings c LEFT JOIN events e ON e.id = c.event_id "
+            "WHERE c.edition_id=? ORDER BY c.page, c.created_at",
+            (edition_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_edition(edition_id: str) -> Edition:
@@ -279,6 +309,12 @@ def get_edition(edition_id: str) -> Edition:
     if row is None:
         raise NotFoundError(edition_id)
     return Edition(**{k: row[k] for k in row.keys()})
+
+
+def known_papers() -> list[str]:
+    with _conn() as c:
+        rows = c.execute("SELECT DISTINCT paper FROM clippings UNION SELECT DISTINCT paper FROM editions")
+        return sorted(r[0] for r in rows)
 
 
 def update_edition(edition_id: str, **fields) -> None:

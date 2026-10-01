@@ -59,6 +59,15 @@ clippings, which the event matcher joins into one event. A full edition costs
 roughly 65k input and up to ~50k output tokens to split, plus a small tagging
 call per article: about $2 on `claude-opus-5`.
 
+**Who can ingest.** Ingestion is internal-only. The Précis admin panel
+(`/admin` in the frontend) signs people in with Google through Firebase
+Authentication. The backend verifies the Firebase ID token and accepts only
+verified emails on `ADMIN_EMAIL_DOMAIN` (`apokryfon.com`); other Google
+accounts get a 403. Each edition records who uploaded it. Scripts use the
+`X-API-Key` header with `INGEST_API_KEY` instead, and those uploads are
+recorded as `api-key`. Requests with neither are refused. Reading endpoints
+(events, analysis, quizzes) stay open.
+
 **Caching.** Event analysis, paper framing, the per-event practice quiz and
 event-to-event link verdicts are stored after the first request. When a new
 clipping joins an event, that event's cached outputs are cleared so they're
@@ -116,7 +125,9 @@ All via environment variables (see `app/config.py`):
 | `EMBEDDING_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Local embedding model |
 | `CHROMA_PERSIST_DIR` | `./data/chroma` | Vector store location |
 | `SQLITE_PATH` | `<chroma dir>/../precis.db` | Records and caches |
-| `INGEST_API_KEY` | *(unset)* | If set, `POST /clippings*` require `X-API-Key` |
+| `INGEST_API_KEY` | *(unset)* | Key for ingestion scripts (`X-API-Key`); unset means only signed-in admins can ingest |
+| `FIREBASE_PROJECT_ID` | *(unset)* | Firebase project the admin panel signs in with; unset disables the panel |
+| `ADMIN_EMAIL_DOMAIN` | `apokryfon.com` | Verified emails on this domain are admins |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated browser origins |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1500` / `200` | Chunking (characters) |
 | `DEFAULT_TOP_K` | `8` | Passages retrieved for "ask the sources" |
@@ -128,17 +139,22 @@ All via environment variables (see `app/config.py`):
 
 ## API
 
-JSON field names are camelCase. Dates are `YYYY-MM-DD`.
+JSON field names are camelCase. Dates are `YYYY-MM-DD`. 🔒 needs an
+internal sign-in (`Authorization: Bearer <Firebase ID token>`) or
+`X-API-Key`; 🛡 needs an internal sign-in.
 
 | Method & path | Purpose |
 |---|---|
 | `GET /topics` | The 14 topics (id, name, short label, exam paper), question formats, difficulties |
 | `GET /stats` | Papers indexed, clippings this month, last ingest time |
-| `POST /clippings` | Ingest `{paper, date, page?, title, text}`. Returns `202` with `status: "processing"` |
-| `POST /clippings/pdf` | Same, as multipart (`file`, `paper`, `date`, `title`, `page?`) |
-| `POST /editions/pdf` | Whole e-paper as multipart (`file`, `paper`, `date`). Returns `202`; split into articles in the background |
-| `GET /editions/{id}` | Progress: `pages`, `pagesDone`, `status`, clippings by status, `events` formed |
+| `POST /clippings` | 🔒 Ingest `{paper, date, page?, title, text}`. Returns `202` with `status: "processing"` |
+| `POST /clippings/pdf` | 🔒 Same, as multipart (`file`, `paper`, `date`, `title`, `page?`) |
+| `POST /editions/pdf` | 🔒 Whole e-paper as multipart (`file`, `paper`, `date`). Returns `202`; split into articles in the background |
+| `GET /editions/{id}` | 🔒 Progress: `pages`, `pagesDone`, `status`, clippings by status, `events` formed |
 | `GET /clippings/{id}` | Status: `processing` / `ready` / `off_syllabus` / `failed` and its `eventId` |
+| `GET /admin/me` | 🛡 The signed-in admin's email (the panel's access check) |
+| `GET /admin/editions?limit=50` | 🛡 Recent editions with progress and uploader, plus known paper names |
+| `GET /admin/editions/{id}/articles` | 🛡 An edition's articles: page, headline, status, the event each joined |
 | `GET /events?from&to&topics=a,b` | Events in the period. Omit `topics` for all, or pass it empty for none. Includes `topicCounts` for the whole period |
 | `GET /events/{id}` | Event with numbered `sources` and `analysis` (`whatHappened`, `whyItMatters` with `[n]` citations, `prelimsFacts`, `gsPaper`, `mainsQuestion`, `timeline`) |
 | `POST /events/{id}/ask` | `{question, from, to}` → `{answer, foundInSources, sources}` |
@@ -181,5 +197,7 @@ offline with no model download and no API key.
   screen still links the two through Claude's direct-link check.
 - Ingestion runs as an in-process background task. A restart mid-ingest
   leaves that clipping `processing`; re-post it.
-- There is no per-user data. Clippings are shared by every reader, and only
-  ingestion is protected (by `INGEST_API_KEY`).
+- There is no per-user data for readers. Clippings are shared by every
+  reader; only ingestion and the admin endpoints are protected.
+- Admin access is all-or-nothing by email domain. There are no roles yet,
+  so anyone on the domain can ingest.

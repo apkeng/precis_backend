@@ -74,10 +74,35 @@ class EditionOut(CamelModel):
     pages_done: int
     status: str  # processing | ready | failed
     error: str | None
+    created_at: str
+    uploaded_by: str | None
     clippings: dict[str, int] = Field(
         default_factory=dict, description="Clippings by status: ready, off_syllabus, failed, processing."
     )
     events: int = 0
+
+
+class AdminMe(CamelModel):
+    email: str
+
+
+class AdminEditions(CamelModel):
+    editions: list[EditionOut]
+    papers: list[str] = Field(description="Paper names seen so far, for the upload form.")
+
+
+class ArticleOut(CamelModel):
+    id: str
+    page: int | None
+    title: str
+    status: str  # processing | ready | off_syllabus | failed
+    error: str | None
+    event_id: str | None
+    event_title: str | None
+
+
+class AdminArticles(CamelModel):
+    articles: list[ArticleOut]
 
 
 # --- Events ------------------------------------------------------------------

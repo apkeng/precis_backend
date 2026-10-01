@@ -12,3 +12,4 @@ jsonschema>=4.22
 requests>=2.32
 pydantic>=2.7
 anthropic>=1.0
+google-auth>=2.30

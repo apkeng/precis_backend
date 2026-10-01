@@ -3,7 +3,8 @@
     python scripts/ingest_edition.py th_international_01_10_2026.pdf "The Hindu" 2026-10-01
     python scripts/ingest_edition.py paper.pdf "The Hindu" 2026-10-01 --api https://api.example.com
 
-Uses INGEST_API_KEY from the environment if the backend requires one. An
+Needs INGEST_API_KEY in the environment, matching the backend's. (Or use
+the admin panel at /admin in the Précis app.) An
 18-page edition takes a few minutes: one Claude call per page to split it
 into articles, then one per news or opinion article to tag and file it.
 """
@@ -37,7 +38,7 @@ edition_id = resp.json()["id"]
 print(f"Edition {edition_id} uploaded; processing...")
 
 while True:
-    e = requests.get(f"{base}/editions/{edition_id}", timeout=30).json()
+    e = requests.get(f"{base}/editions/{edition_id}", headers=headers, timeout=30).json()
     print(f"  page {e['pagesDone']}/{e['pages'] or '?'}  clippings {e['clippings']}  events {e['events']}")
     if e["status"] != "processing":
         break

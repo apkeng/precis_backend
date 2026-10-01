@@ -4,7 +4,7 @@ into a running backend, so the frontend has something to show.
     python scripts/seed_sample.py                       # http://localhost:8000
     python scripts/seed_sample.py https://api.example.com
 
-Uses INGEST_API_KEY from the environment if the backend requires one. Each
+Needs INGEST_API_KEY in the environment, matching the backend's. Each
 clipping is tagged by Claude, so this makes ~24 API calls.
 """
 from __future__ import annotations
