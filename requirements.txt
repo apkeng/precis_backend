@@ -1,0 +1,14 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pypdf>=4.0
+chromadb>=0.5
+# Same embedding stack as Newspaper_ingestion. Pinned <3.0 there because
+# sentence-transformers>=3.0 imports scikit-learn at package init, which an
+# Application Control policy on that machine blocks; 2.7.0 has the same
+# SentenceTransformer/.encode API without that import.
+sentence-transformers==2.7.0
+jsonschema>=4.22
+requests>=2.32
+pydantic>=2.7
+anthropic>=1.0
