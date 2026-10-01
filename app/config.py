@@ -58,9 +58,10 @@ class Settings:
     ingest_api_key: str = os.environ.get("INGEST_API_KEY", "").strip()
 
     # Admin panel sign-in (see app/auth.py): the Firebase project whose ID
-    # tokens the panel sends - not a secret, it's the `aud` every token from
-    # that project carries - and the email domain that counts as internal.
-    firebase_project_id: str = os.environ.get("FIREBASE_PROJECT_ID", "").strip()
+    # tokens the panel sends - the Précis project by default. Not a secret,
+    # it's the `aud` every token from that project carries. Plus the email
+    # domain that counts as internal.
+    firebase_project_id: str = os.environ.get("FIREBASE_PROJECT_ID", "newsdigest-9fd33").strip()
     admin_email_domain: str = os.environ.get("ADMIN_EMAIL_DOMAIN", "apokryfon.com").strip().lstrip("@")
 
     # Origins allowed to call this API from a browser (comma-separated).

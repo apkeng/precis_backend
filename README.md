@@ -126,7 +126,7 @@ All via environment variables (see `app/config.py`):
 | `CHROMA_PERSIST_DIR` | `./data/chroma` | Vector store location |
 | `SQLITE_PATH` | `<chroma dir>/../precis.db` | Records and caches |
 | `INGEST_API_KEY` | *(unset)* | Key for ingestion scripts (`X-API-Key`); unset means only signed-in admins can ingest |
-| `FIREBASE_PROJECT_ID` | *(unset)* | Firebase project the admin panel signs in with; unset disables the panel |
+| `FIREBASE_PROJECT_ID` | `newsdigest-9fd33` | Firebase project the admin panel signs in with; must match the frontend's |
 | `ADMIN_EMAIL_DOMAIN` | `apokryfon.com` | Verified emails on this domain are admins |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated browser origins |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1500` / `200` | Chunking (characters) |
