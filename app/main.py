@@ -4,6 +4,7 @@ in the clippings of the period the reader picked."""
 from __future__ import annotations
 
 import re
+from contextlib import asynccontextmanager
 from datetime import date
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
@@ -14,6 +15,7 @@ from app import analysis, quiz, store
 from app.auth import Caller, require_admin, require_ingest_access
 from app.config import settings
 from app.editions import process_edition
+from app.embeddings import LocalEmbeddingFunction
 from app.ingestion import process_clipping
 from app.llm import LLMGenerationError, SchemaValidationError
 from app.pdf_processor import extract_text_by_page
@@ -38,7 +40,19 @@ from app.schemas import (
 )
 from app.topics import DIFFICULTIES, QUESTION_FORMATS, TOPIC_IDS, TOPICS
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Load the embedding model (and the scikit-learn it pulls in) once, before
+    # serving. Loaded lazily inside a background ingest instead, a one-off
+    # import failure - e.g. Windows Application Control blocking a DLL - leaves
+    # a half-imported module behind and every later clipping fails with it.
+    LocalEmbeddingFunction()(["warm-up"])
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Précis backend",
     description=(
         "Newspaper clippings grouped into syllabus-tagged events, with "
