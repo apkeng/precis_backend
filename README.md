@@ -14,6 +14,9 @@ schema-enforced JSON output.
 ## How it works
 
 ```
+e-paper PDF (whole edition) --> per page: Claude splits into articles (news / opinion kept)
+        |                                         |
+        +-----------------------------------------+--> one clipping per article
 clipping (JSON or PDF) --> chunk --> local embeddings --> Chroma `clippings`
         |
         +--> nearest events (Chroma `events`, ±10 days) --> Claude: topics + same event or new?
@@ -42,6 +45,19 @@ surrounding days are shown to Claude with the clipping. Claude tags the
 syllabus topics, then either picks the event the clipping reports on or
 starts a new one with a neutral headline. Clippings that touch none of the 14
 topics are kept as `off_syllabus` and never appear in the app.
+
+**Whole editions.** `POST /editions/pdf` takes a full day's e-paper. Text
+extraction and cleanup were checked on an 18-page edition of The Hindu
+International; the Claude splitting step has not yet been run against a
+real edition. pypdf's text comes out in column
+order with ligature glyphs (`/f_i`, `ﬀ`) and words hyphenated across lines.
+`app/text_cleanup.py` repairs those, then one Claude call per page splits it
+into articles. Claude returns each article's text verbatim and labels it
+news, opinion or other. Adverts, indexes, sport and entertainment are dropped
+before any tagging cost. A story continued on another page becomes two
+clippings, which the event matcher joins into one event. A full edition costs
+roughly 65k input and up to ~50k output tokens to split, plus a small tagging
+call per article: about $2 on `claude-opus-5`.
 
 **Caching.** Event analysis, paper framing, the per-event practice quiz and
 event-to-event link verdicts are stored after the first request. When a new
@@ -79,6 +95,12 @@ Load the sample clippings (the placeholder stories from the design):
 python scripts/seed_sample.py
 ```
 
+Ingest a real e-paper edition:
+
+```bash
+python scripts/ingest_edition.py th_international_01_10_2026.pdf "The Hindu" 2026-10-01
+```
+
 Or with Docker: `docker compose up --build` (pass `ANTHROPIC_API_KEY`).
 
 ## Configuration
@@ -114,6 +136,8 @@ JSON field names are camelCase. Dates are `YYYY-MM-DD`.
 | `GET /stats` | Papers indexed, clippings this month, last ingest time |
 | `POST /clippings` | Ingest `{paper, date, page?, title, text}`. Returns `202` with `status: "processing"` |
 | `POST /clippings/pdf` | Same, as multipart (`file`, `paper`, `date`, `title`, `page?`) |
+| `POST /editions/pdf` | Whole e-paper as multipart (`file`, `paper`, `date`). Returns `202`; split into articles in the background |
+| `GET /editions/{id}` | Progress: `pages`, `pagesDone`, `status`, clippings by status, `events` formed |
 | `GET /clippings/{id}` | Status: `processing` / `ready` / `off_syllabus` / `failed` and its `eventId` |
 | `GET /events?from&to&topics=a,b` | Events in the period. Omit `topics` for all, or pass it empty for none. Includes `topicCounts` for the whole period |
 | `GET /events/{id}` | Event with numbered `sources` and `analysis` (`whatHappened`, `whyItMatters` with `[n]` citations, `prelimsFacts`, `gsPaper`, `mainsQuestion`, `timeline`) |
@@ -149,6 +173,9 @@ offline with no model download and no API key.
 ## Known limitations
 
 - Scanned or image-only PDFs aren't OCR'd.
+- Page splitting relies on PDF text order. A layout that interleaves two
+  stories line by line can merge or split them; the e-paper checked here
+  extracts column by column.
 - Event matching only looks ±`EVENT_MATCH_WINDOW_DAYS` around a clipping's
   date, so a story that resurfaces weeks later starts a new event. The trace
   screen still links the two through Claude's direct-link check.

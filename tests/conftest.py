@@ -51,6 +51,14 @@ class FakeClaude:
                 "relevant": self.relevant, "topics": self.tag_topics, "match": match,
                 "headline": headline, "dek": "Summary of " + headline,
             }
+        if "articles" in props:
+            page = int(re.search(r"page (\d+):", prompt).group(1))
+            body = prompt.split(":\n\n", 1)[1]
+            return {"articles": [
+                {"headline": f"Page {page} lead story", "kind": "news", "text": body * 20},
+                {"headline": "Advert", "kind": "other", "text": ""},
+                {"headline": "Brief", "kind": "news", "text": "Too short."},
+            ]}
         if "what_happened" in props:
             return {
                 "what_happened": "It happened [1]. Also [9].",

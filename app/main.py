@@ -12,14 +12,17 @@ from fastapi.responses import JSONResponse
 
 from app import analysis, quiz, store
 from app.config import settings
+from app.editions import process_edition
 from app.ingestion import process_clipping
 from app.llm import LLMGenerationError, SchemaValidationError
 from app.pdf_processor import extract_text_by_page
+from app.text_cleanup import clean_extracted_text
 from app.schemas import (
     AskIn,
     AskResponse,
     ClippingIn,
     ClippingOut,
+    EditionOut,
     EventDetail,
     EventListResponse,
     EventSummary,
@@ -141,7 +144,7 @@ def ingest_clipping(body: ClippingIn, background_tasks: BackgroundTasks) -> Clip
 
 def _ingest_pdf(clipping_id: str, pdf_bytes: bytes) -> None:
     try:
-        text = "\n\n".join(extract_text_by_page(pdf_bytes))
+        text = clean_extracted_text("\n\n".join(extract_text_by_page(pdf_bytes)))
     except Exception as exc:  # noqa: BLE001 - surfaced through the clipping's status
         store.set_clipping_status(clipping_id, "failed", str(exc))
         return
@@ -175,6 +178,39 @@ def get_clipping(clipping_id: str) -> ClippingOut:
         return _clipping_out(store.get_clipping(clipping_id))
     except store.NotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"No clipping with id {clipping_id!r}.") from exc
+
+
+def _edition_out(edition: store.Edition) -> EditionOut:
+    progress = store.edition_progress(edition.id)
+    return EditionOut(
+        **edition.__dict__ | {"clippings": progress["by_status"], "events": progress["events"]}
+    )
+
+
+@app.post("/editions/pdf", response_model=EditionOut, status_code=202, dependencies=[Depends(require_ingest_key)])
+async def ingest_edition(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(..., description="A whole day's e-paper PDF."),
+    paper: str = Form(..., min_length=1),
+    date_: str = Form(..., alias="date"),
+) -> EditionOut:
+    """Split every page into articles and ingest each one. Poll
+    GET /editions/{id} for progress - a full edition takes a few minutes."""
+    if file.content_type not in ("application/pdf", "application/octet-stream"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be a PDF.")
+    _date_param(date_, "date")
+    pdf_bytes = await file.read()
+    edition = store.create_edition(paper, date_)
+    background_tasks.add_task(process_edition, edition.id, pdf_bytes)
+    return _edition_out(edition)
+
+
+@app.get("/editions/{edition_id}", response_model=EditionOut)
+def get_edition(edition_id: str) -> EditionOut:
+    try:
+        return _edition_out(store.get_edition(edition_id))
+    except store.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No edition with id {edition_id!r}.") from exc
 
 
 # --- Reading -----------------------------------------------------------------

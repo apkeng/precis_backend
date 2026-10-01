@@ -66,6 +66,20 @@ class ClippingOut(CamelModel):
     event_id: str | None
 
 
+class EditionOut(CamelModel):
+    id: str
+    paper: str
+    date: str
+    pages: int
+    pages_done: int
+    status: str  # processing | ready | failed
+    error: str | None
+    clippings: dict[str, int] = Field(
+        default_factory=dict, description="Clippings by status: ready, off_syllabus, failed, processing."
+    )
+    events: int = 0
+
+
 # --- Events ------------------------------------------------------------------
 
 

@@ -48,10 +48,22 @@ CREATE TABLE IF NOT EXISTS clippings (
     event_id TEXT REFERENCES events(id),
     status TEXT NOT NULL,
     error TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    edition_id TEXT REFERENCES editions(id)
 );
 CREATE INDEX IF NOT EXISTS clippings_event ON clippings(event_id);
 CREATE INDEX IF NOT EXISTS clippings_date ON clippings(date);
+
+CREATE TABLE IF NOT EXISTS editions (
+    id TEXT PRIMARY KEY,
+    paper TEXT NOT NULL,
+    date TEXT NOT NULL,
+    pages INTEGER NOT NULL DEFAULT 0,
+    pages_done INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS event_links (
     a TEXT NOT NULL,
@@ -76,6 +88,19 @@ class Clipping:
     title: str
     text: str
     event_id: str | None
+    status: str
+    error: str | None
+    created_at: str
+    edition_id: str | None = None
+
+
+@dataclass
+class Edition:
+    id: str
+    paper: str
+    date: str
+    pages: int
+    pages_done: int
     status: str
     error: str | None
     created_at: str
@@ -146,7 +171,9 @@ def _event(row: sqlite3.Row) -> Event:
 # --- Clippings ---------------------------------------------------------------
 
 
-def create_clipping(paper: str, date: str, page: int | None, title: str, text: str) -> Clipping:
+def create_clipping(
+    paper: str, date: str, page: int | None, title: str, text: str, edition_id: str | None = None
+) -> Clipping:
     clipping = Clipping(
         id=uuid.uuid4().hex,
         paper=paper,
@@ -158,11 +185,13 @@ def create_clipping(paper: str, date: str, page: int | None, title: str, text: s
         status="processing",
         error=None,
         created_at=_now(),
+        edition_id=edition_id,
     )
     with _conn() as c:
         c.execute(
-            "INSERT INTO clippings VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (clipping.id, paper, date, page, title, text, None, "processing", None, clipping.created_at),
+            "INSERT INTO clippings (id, paper, date, page, title, text, status, created_at, edition_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (clipping.id, paper, date, page, title, text, "processing", clipping.created_at, edition_id),
         )
     return clipping
 
@@ -226,6 +255,52 @@ def daily_counts(event_ids: list[str], date_from: str, date_to: str) -> dict[str
     for r in rows:
         out.setdefault(r["event_id"], {})[r["date"]] = r["n"]
     return out
+
+
+# --- Editions ----------------------------------------------------------------
+
+
+def create_edition(paper: str, date: str) -> Edition:
+    edition = Edition(
+        id=uuid.uuid4().hex, paper=paper, date=date, pages=0, pages_done=0,
+        status="processing", error=None, created_at=_now(),
+    )
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO editions VALUES (?,?,?,?,?,?,?,?)",
+            (edition.id, paper, date, 0, 0, "processing", None, edition.created_at),
+        )
+    return edition
+
+
+def get_edition(edition_id: str) -> Edition:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM editions WHERE id=?", (edition_id,)).fetchone()
+    if row is None:
+        raise NotFoundError(edition_id)
+    return Edition(**{k: row[k] for k in row.keys()})
+
+
+def update_edition(edition_id: str, **fields) -> None:
+    allowed = {"pages", "pages_done", "status", "error"}
+    if not fields or set(fields) - allowed:
+        raise ValueError(f"Can only update {sorted(allowed)}")
+    assignments = ", ".join(f"{k}=?" for k in fields)
+    with _conn() as c:
+        c.execute(f"UPDATE editions SET {assignments} WHERE id=?", (*fields.values(), edition_id))
+
+
+def edition_progress(edition_id: str) -> dict:
+    """Clipping counts by status, and how many distinct events they formed."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT status, COUNT(*) AS n FROM clippings WHERE edition_id=? GROUP BY status", (edition_id,)
+        ).fetchall()
+        events = c.execute(
+            "SELECT COUNT(DISTINCT event_id) FROM clippings WHERE edition_id=? AND status='ready'",
+            (edition_id,),
+        ).fetchone()[0]
+    return {"by_status": {r["status"]: r["n"] for r in rows}, "events": events}
 
 
 # --- Events ------------------------------------------------------------------
