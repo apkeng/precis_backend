@@ -13,6 +13,7 @@ recommended fallback model inside the same call instead of failing.
 from __future__ import annotations
 
 import json
+import time
 
 import anthropic
 import jsonschema
@@ -20,6 +21,14 @@ import jsonschema
 from app.config import settings
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+# Overloaded / 5xx / rate-limited / dropped calls are retried with backoff
+# (2s, 4s, 8s). The SDK's own retries don't cover an error that arrives
+# mid-stream (reported with HTTP status 200), which is how an overloaded API
+# usually answers a streamed call.
+MAX_ATTEMPTS = 4
+RETRY_BASE_SECONDS = 2.0
+_TRANSIENT_ERROR_TYPES = {"overloaded_error", "api_error", "rate_limit_error"}
 
 
 class LLMGenerationError(RuntimeError):
@@ -67,7 +76,28 @@ def _get_anthropic_client() -> anthropic.Anthropic:
     return _anthropic_client
 
 
+def _is_transient(exc: Exception) -> bool:
+    if isinstance(exc, (anthropic.APIConnectionError, anthropic.RateLimitError, anthropic.InternalServerError)):
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        body = exc.body if isinstance(exc.body, dict) else {}
+        error = body.get("error") if isinstance(body.get("error"), dict) else body
+        return error.get("type") in _TRANSIENT_ERROR_TYPES
+    return False
+
+
 def _call_claude(system_prompt: str, prompt: str, output_schema: dict, effort: str) -> str:
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            return _call_claude_once(system_prompt, prompt, output_schema, effort)
+        except LLMGenerationError as exc:
+            if attempt == MAX_ATTEMPTS or not _is_transient(exc.__cause__):
+                raise
+            time.sleep(RETRY_BASE_SECONDS * 2 ** (attempt - 1))
+    raise AssertionError("unreachable")
+
+
+def _call_claude_once(system_prompt: str, prompt: str, output_schema: dict, effort: str) -> str:
     client = _get_anthropic_client()
     try:
         # Streamed so long outputs (a 20-question quiz) can't hit the HTTP

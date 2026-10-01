@@ -113,3 +113,52 @@ def test_strict_schema_recurses_into_nested_schemas():
     assert result["properties"]["already_set"]["additionalProperties"] is True
     assert result["properties"]["items"]["items"]["additionalProperties"] is False
     assert "additionalProperties" not in schema
+
+
+def _status_error(status, body):
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.APIStatusError("error", response=httpx2.Response(status, request=request), body=body)
+
+
+def test_overloaded_mid_stream_is_retried(monkeypatch):
+    calls = []
+
+    def stream(**kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            # How an overloaded API answers a call whose stream already started.
+            raise _status_error(200, {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})
+        return _FakeStream(_response(json.dumps({"answer": "ok"})))
+
+    monkeypatch.setattr(llm, "_get_anthropic_client", lambda: _client(stream))
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    assert llm.generate_json("sys", "q?", SCHEMA) == {"answer": "ok"}
+    assert len(calls) == 3
+
+
+def test_retries_give_up_after_max_attempts(monkeypatch):
+    calls = []
+
+    def stream(**kwargs):
+        calls.append(1)
+        raise _status_error(529, {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})
+
+    monkeypatch.setattr(llm, "_get_anthropic_client", lambda: _client(stream))
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    with pytest.raises(llm.LLMGenerationError):
+        llm.generate_json("sys", "q?", SCHEMA)
+    assert len(calls) == llm.MAX_ATTEMPTS
+
+
+def test_non_transient_errors_are_not_retried(monkeypatch):
+    calls = []
+
+    def stream(**kwargs):
+        calls.append(1)
+        raise _status_error(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "bad"}})
+
+    monkeypatch.setattr(llm, "_get_anthropic_client", lambda: _client(stream))
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    with pytest.raises(llm.LLMGenerationError):
+        llm.generate_json("sys", "q?", SCHEMA)
+    assert len(calls) == 1
