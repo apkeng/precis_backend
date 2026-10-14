@@ -18,7 +18,9 @@ from app.pdf_processor import extract_text_by_page
 from app.text_cleanup import clean_extracted_text
 
 INGESTED_KINDS = ("news", "opinion")
-MIN_ARTICLE_CHARS = 300
+# Low enough to keep a single item from a roundup column (~300-450 chars of
+# wire copy), high enough to drop captions and stray fragments.
+MIN_ARTICLE_CHARS = 150
 
 SEGMENT_SCHEMA = {
     "type": "object",
@@ -54,7 +56,12 @@ environment, society; "opinion" for editorials, columns and op-eds; \
 - text: the article's full text exactly as printed, with line breaks inside \
 sentences joined, paragraphs separated by blank lines, and captions, \
 bylines and "Continued on" markers removed. Do not summarise, shorten or \
-reword it. For "other" items, text may be empty."""
+reword it. For "other" items, text may be empty.
+
+A roundup or briefs column ("News in Numbers", "In Brief", "World Briefs" \
+and the like) is several unrelated items under one section label. Return \
+each item as its own article, with the item's own headline - never the \
+column as one article."""
 
 
 def process_edition(edition_id: str, pdf_bytes: bytes) -> None:

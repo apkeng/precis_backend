@@ -36,6 +36,34 @@ def test_edition_is_split_into_articles_and_ingested(client, fake_claude, monkey
     assert sorted(e["title"] for e in events) == ["Page 1 lead story", "Page 3 lead story"]
 
 
+def test_roundup_items_are_kept_as_separate_clippings(client, fake_claude, monkeypatch):
+    fake_claude.force_new = True
+    assert "News in Numbers" in editions.SEGMENT_SYSTEM_PROMPT
+    monkeypatch.setattr(editions, "extract_text_by_page", lambda b: ["News in Numbers page."])
+    real = fake_claude.__call__
+    item = "35 in per cent. The UN refugee agency has secured only $3 billion, or 35% of the $8.5 billion it needs for 2026, its chief said in Geneva on Monday. REUTERS"
+    assert editions.MIN_ARTICLE_CHARS <= len(item) < 300
+
+    def roundup(system, prompt, schema, effort="medium"):
+        if "articles" in schema["properties"]:
+            return {"articles": [
+                {"headline": "Share of 2026 funding received by UN refugee agency", "kind": "news", "text": item},
+                {"headline": "Fine imposed by Norway on Xandr", "kind": "news", "text": item.replace("UN", "Norway's")},
+            ]}
+        return real(system, prompt, schema, effort)
+
+    monkeypatch.setattr(editions.llm, "generate_json", roundup)
+    resp = client.post(
+        "/editions/pdf",
+        files={"file": ("paper.pdf", b"%PDF", "application/pdf")},
+        data={"paper": "The Hindu", "date": "2026-10-13"},
+        headers=KEY_HEADERS,
+    )
+    body = client.get(f"/editions/{resp.json()['id']}", headers=KEY_HEADERS).json()
+    assert body["clippings"] == {"ready": 2}
+    assert body["events"] == 2
+
+
 def test_edition_page_failure_is_recorded_and_others_continue(client, fake_claude, monkeypatch):
     monkeypatch.setattr(editions, "extract_text_by_page", lambda b: ["Page one text.", "Page two text."])
     real = fake_claude.__call__
