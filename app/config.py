@@ -42,7 +42,7 @@ class Settings:
     # How many nearby events Claude is shown when deciding whether a new
     # clipping belongs to an existing event, and how far apart (days) they
     # may be.
-    event_match_candidates: int = _int("EVENT_MATCH_CANDIDATES", 5)
+    event_match_candidates: int = _int("EVENT_MATCH_CANDIDATES", 10)
     event_match_window_days: int = _int("EVENT_MATCH_WINDOW_DAYS", 10)
     # How many candidate events the story-analysis screen asks Claude to
     # check for a direct link.
