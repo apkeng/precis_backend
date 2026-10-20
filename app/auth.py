@@ -7,6 +7,9 @@ Bearer <token>`. A token counts as internal only if its email is verified
 and on ADMIN_EMAIL_DOMAIN. Token verification is the same as
 Newspaper_ingestion's app/auth.py.
 
+Readers sign in the same way (Google or email + password, any domain) to
+use quizzes; see `require_reader` and `require_quiz_access`.
+
 Scripts (scripts/ingest_edition.py, scripts/seed_sample.py) keep using the
 `X-API-Key` header with INGEST_API_KEY. With neither a valid token nor the
 key, ingestion is refused - there is no anonymous ingest.
@@ -17,12 +20,14 @@ import hmac
 import threading
 import time
 from dataclasses import dataclass
+from datetime import date
 
 import requests
 from fastapi import Header, HTTPException
 from google.auth import exceptions as google_auth_exceptions
 from google.auth import jwt as google_jwt
 
+from app import store
 from app.config import settings
 
 _CERTS_URL = (
@@ -124,3 +129,49 @@ def require_ingest_access(
     raise HTTPException(
         status_code=401, detail="Ingestion needs an internal sign-in or a valid X-API-Key."
     )
+
+
+@dataclass(frozen=True)
+class Reader:
+    """A signed-in reader of any domain."""
+
+    uid: str
+    email: str
+    name: str | None
+    internal: bool
+
+
+def require_reader(authorization: str | None = Header(default=None)) -> Reader:
+    """FastAPI dependency: anyone signed in with an email address."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Sign in to use quizzes.")
+    try:
+        claims = verify_firebase_token(_bearer(authorization))
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=503, detail="Couldn't reach Google to verify the sign-in token."
+        ) from exc
+    email = claims.get("email")
+    if not email:
+        raise HTTPException(status_code=401, detail="Sign in with an account that has an email address.")
+    return Reader(
+        uid=claims["sub"],
+        email=email,
+        name=claims.get("name"),
+        internal=is_internal_email(email, bool(claims.get("email_verified"))),
+    )
+
+
+def require_quiz_access(authorization: str | None = Header(default=None)) -> Reader:
+    """FastAPI dependency for quizzes: an internal user, or a reader whose
+    paid access hasn't run out. 402 tells the app to show the payment step."""
+    reader = require_reader(authorization)
+    if reader.internal:
+        return reader
+    sub = store.upsert_subscriber(reader.uid, reader.email, reader.name)
+    # Access already granted counts even while a renewal awaits the admin.
+    if not (sub.access_until and sub.access_until >= date.today().isoformat()):
+        raise HTTPException(status_code=402, detail="Quizzes need an active subscription.")
+    return reader

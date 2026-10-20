@@ -64,6 +64,21 @@ class Settings:
     firebase_project_id: str = os.environ.get("FIREBASE_PROJECT_ID", "newsdigest-9fd33").strip()
     admin_email_domain: str = os.environ.get("ADMIN_EMAIL_DOMAIN", "apokryfon.com").strip().lstrip("@")
 
+    # Paid quiz access (see app/payments.py). Readers confirm a payment, get a
+    # UPI QR code by email, pay, and an admin then activates them. Without
+    # UPI_VPA the payment email can't be built and confirmations are refused.
+    subscription_price_inr: int = _int("SUBSCRIPTION_PRICE_INR", 500)
+    subscription_days: int = _int("SUBSCRIPTION_DAYS", 30)
+    upi_vpa: str = os.environ.get("UPI_VPA", "").strip()
+    upi_payee_name: str = os.environ.get("UPI_PAYEE_NAME", "Apokryfon").strip()
+    # Where readers sign in, linked from the emails.
+    app_url: str = os.environ.get("APP_URL", "https://reader-nine-sigma.vercel.app").strip().rstrip("/")
+
+    # Outgoing email through Resend (https://resend.com). The sender's domain
+    # must be verified in that Resend account.
+    resend_api_key: str = os.environ.get("RESEND_API_KEY", "").strip()
+    mail_from: str = os.environ.get("MAIL_FROM", "Truesight <support@truesight.community>").strip()
+
     # Origins allowed to call this API from a browser (comma-separated).
     # Defaults cover the Précis Vite dev server. Each entry is trimmed and has
     # any trailing slash removed, since a browser's Origin header is always

@@ -91,6 +91,53 @@ class AdminEditions(CamelModel):
     papers: list[str] = Field(description="Paper names seen so far, for the upload form.")
 
 
+class AccountOut(CamelModel):
+    """The signed-in reader's account. status: new | payment_pending |
+    active | expired; internal users always have quiz access."""
+
+    email: str
+    name: str | None
+    internal: bool
+    status: str
+    quiz_access: bool
+    access_until: str | None
+    payment_confirmed_at: str | None
+    ref: str
+    price_inr: int
+    days: int
+
+
+class SubscriberOut(CamelModel):
+    uid: str
+    email: str
+    name: str | None
+    ref: str
+    status: str
+    created_at: str
+    payment_confirmed_at: str | None
+    payment_email_sent_at: str | None
+    activated_at: str | None
+    activated_by: str | None
+    access_until: str | None
+    login_email_sent_at: str | None
+
+
+class SubscriberCounts(CamelModel):
+    accounts: int
+    payment_confirmed: int = Field(description="Readers who have pressed Confirm payment at least once.")
+    awaiting_activation: int
+    active: int
+
+
+class AdminSubscribers(CamelModel):
+    counts: SubscriberCounts
+    subscribers: list[SubscriberOut]
+
+
+class LoginEmailIn(CamelModel):
+    days: int = Field(default=30, ge=0, le=366, description="Days of access to add; 0 just resends the email.")
+
+
 class ArticleOut(CamelModel):
     id: str
     page: int | None

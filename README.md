@@ -66,7 +66,17 @@ verified emails on `ADMIN_EMAIL_DOMAIN` (`apokryfon.com`); other Google
 accounts get a 403. Each edition records who uploaded it. Scripts use the
 `X-API-Key` header with `INGEST_API_KEY` instead, and those uploads are
 recorded as `api-key`. Requests with neither are refused. Reading endpoints
-(events, analysis, quizzes) stay open.
+(events, analysis) stay open.
+
+**Paid quizzes.** Quizzes need a signed-in reader (any Google or
+email + password account in the same Firebase project) with paid access;
+internal users always have it. There is no payment gateway: the reader
+presses *Confirm payment*, `POST /account/confirm-payment` emails them a UPI
+QR code (via Resend, from `MAIL_FROM`) for `SUBSCRIPTION_PRICE_INR` with a
+6-character reference in the payment note. An admin matches the payment by
+that reference and, in the admin panel's Subscribers tab, grants
+`SUBSCRIPTION_DAYS` of access, which also emails the reader a sign-in link.
+Without access, quiz endpoints answer `402`.
 
 **Caching.** Event analysis, paper framing, the per-event practice quiz and
 event-to-event link verdicts are stored after the first request. When a new
@@ -128,6 +138,11 @@ All via environment variables (see `app/config.py`):
 | `INGEST_API_KEY` | *(unset)* | Key for ingestion scripts (`X-API-Key`); unset means only signed-in admins can ingest |
 | `FIREBASE_PROJECT_ID` | `newsdigest-9fd33` | Firebase project the admin panel signs in with; must match the frontend's |
 | `ADMIN_EMAIL_DOMAIN` | `apokryfon.com` | Verified emails on this domain are admins |
+| `UPI_VPA` / `UPI_PAYEE_NAME` | *(unset)* / `Apokryfon` | UPI ID payments go to; unset means *Confirm payment* is refused (`503`) |
+| `SUBSCRIPTION_PRICE_INR` / `SUBSCRIPTION_DAYS` | `500` / `30` | Price and length of one subscription period |
+| `RESEND_API_KEY` | *(unset)* | Resend key for the payment and login emails |
+| `MAIL_FROM` | `Truesight <support@truesight.community>` | Sender; its domain must be verified in Resend |
+| `APP_URL` | `https://reader-nine-sigma.vercel.app` | Reader app, linked from the emails |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated browser origins |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1500` / `200` | Chunking (characters) |
 | `DEFAULT_TOP_K` | `8` | Passages retrieved for "ask the sources" |
@@ -141,7 +156,8 @@ All via environment variables (see `app/config.py`):
 
 JSON field names are camelCase. Dates are `YYYY-MM-DD`. 🔒 needs an
 internal sign-in (`Authorization: Bearer <Firebase ID token>`) or
-`X-API-Key`; 🛡 needs an internal sign-in.
+`X-API-Key`; 🛡 needs an internal sign-in; 👤 needs any sign-in; 💳 needs
+a sign-in with quiz access (`402` without).
 
 | Method & path | Purpose |
 |---|---|
@@ -155,12 +171,16 @@ internal sign-in (`Authorization: Bearer <Firebase ID token>`) or
 | `GET /admin/me` | 🛡 The signed-in admin's email (the panel's access check) |
 | `GET /admin/editions?limit=50` | 🛡 Recent editions with progress and uploader, plus known paper names |
 | `GET /admin/editions/{id}/articles` | 🛡 An edition's articles: page, headline, status, the event each joined |
+| `GET /admin/subscribers` | 🛡 Reader accounts with payment/access status, plus `counts` (`accounts`, `paymentConfirmed`, `awaitingActivation`, `active`) |
+| `POST /admin/subscribers/{uid}/login-email` | 🛡 `{days}`: add `days` of access (default 30; `0` only resends) and email the reader a sign-in link |
+| `GET /account` | 👤 The reader's account (created on first call): `status` `new` / `payment_pending` / `active` / `expired`, `quizAccess`, `accessUntil`, `ref` |
+| `POST /account/confirm-payment` | 👤 Email the reader the UPI QR code; returns the account |
 | `GET /events?from&to&topics=a,b` | Events in the period. Omit `topics` for all, or pass it empty for none. Includes `topicCounts` for the whole period |
 | `GET /events/{id}` | Event with numbered `sources` and `analysis` (`whatHappened`, `whyItMatters` with `[n]` citations, `prelimsFacts`, `gsPaper`, `mainsQuestion`, `timeline`) |
 | `POST /events/{id}/ask` | `{question, from, to}` → `{answer, foundInSources, sources}` |
 | `GET /events/{id}/trace?from&to` | `days` (clippings per day on the story and on related events), `related` (`kind: "direct" \| "theme"` and a reason), `outsideCount` / `outsideRange` (direct links outside the period), `framing` per paper |
-| `GET /events/{id}/quiz` | Three-question practice quiz for one event |
-| `POST /quizzes` | `{from, to, topics, formats, length, difficulty, eventIds?}` → `{questions, requested}` |
+| `GET /events/{id}/quiz` | 💳 Three-question practice quiz for one event |
+| `POST /quizzes` | 💳 `{from, to, topics, formats, length, difficulty, eventIds?}` → `{questions, requested}` |
 
 Errors: `404` for an unknown id, `409` when a quiz has no material, `422`
 for bad input, `502` when Claude fails or its output doesn't validate.

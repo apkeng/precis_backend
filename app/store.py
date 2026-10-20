@@ -78,6 +78,20 @@ CREATE TABLE IF NOT EXISTS event_links (
     reason TEXT NOT NULL,
     PRIMARY KEY (a, b)
 );
+
+CREATE TABLE IF NOT EXISTS subscribers (
+    uid TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    name TEXT,
+    ref TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    payment_confirmed_at TEXT,
+    payment_email_sent_at TEXT,
+    activated_at TEXT,
+    activated_by TEXT,
+    access_until TEXT,
+    login_email_sent_at TEXT
+);
 """
 
 
@@ -111,6 +125,36 @@ class Edition:
     error: str | None
     created_at: str
     uploaded_by: str | None = None
+
+
+@dataclass
+class Subscriber:
+    """A reader account (a Firebase user) and where it is in the paid
+    journey: confirmed payment -> emailed the UPI QR -> activated by an admin,
+    who emails a login link. `access_until` is the last day (inclusive) quizzes
+    are open to them."""
+
+    uid: str
+    email: str
+    name: str | None
+    ref: str
+    created_at: str
+    payment_confirmed_at: str | None = None
+    payment_email_sent_at: str | None = None
+    activated_at: str | None = None
+    activated_by: str | None = None
+    access_until: str | None = None
+    login_email_sent_at: str | None = None
+
+    def status(self, today: str) -> str:
+        """new | payment_pending | active | expired. A payment confirmed
+        after the last activation is pending even while older access lasts,
+        so a renewal shows up for the admin."""
+        if self.payment_confirmed_at and (not self.activated_at or self.activated_at < self.payment_confirmed_at):
+            return "payment_pending"
+        if self.access_until:
+            return "active" if self.access_until >= today else "expired"
+        return "new"
 
 
 @dataclass
@@ -440,3 +484,55 @@ def index_stats(month_prefix: str) -> dict:
         ).fetchone()[0]
         last = c.execute("SELECT MAX(created_at) FROM clippings WHERE status='ready'").fetchone()[0]
     return {"papers": papers, "clippings_this_month": month, "refreshed_at": last}
+
+
+# --- Subscribers -------------------------------------------------------------
+
+
+def _subscriber(row: sqlite3.Row) -> Subscriber:
+    return Subscriber(**{k: row[k] for k in row.keys()})
+
+
+def upsert_subscriber(uid: str, email: str, name: str | None) -> Subscriber:
+    """The account for a signed-in reader, created on first sight. Email and
+    name follow the latest sign-in."""
+    with _conn() as c:
+        row = c.execute("SELECT * FROM subscribers WHERE uid=?", (uid,)).fetchone()
+        if row:
+            c.execute("UPDATE subscribers SET email=?, name=? WHERE uid=?", (email, name, uid))
+        else:
+            # A short reference the reader puts in the UPI note, so a payment
+            # can be matched to the account.
+            while True:
+                ref = uuid.uuid4().hex[:6].upper()
+                if not c.execute("SELECT 1 FROM subscribers WHERE ref=?", (ref,)).fetchone():
+                    break
+            c.execute(
+                "INSERT INTO subscribers (uid, email, name, ref, created_at) VALUES (?,?,?,?,?)",
+                (uid, email, name, ref, _now()),
+            )
+        return _subscriber(c.execute("SELECT * FROM subscribers WHERE uid=?", (uid,)).fetchone())
+
+
+def get_subscriber(uid: str) -> Subscriber:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM subscribers WHERE uid=?", (uid,)).fetchone()
+    if not row:
+        raise NotFoundError(uid)
+    return _subscriber(row)
+
+
+def list_subscribers() -> list[Subscriber]:
+    """Latest payment confirmations first, then accounts that haven't paid."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM subscribers ORDER BY payment_confirmed_at IS NULL, payment_confirmed_at DESC, created_at DESC"
+        ).fetchall()
+    return [_subscriber(r) for r in rows]
+
+
+def update_subscriber(uid: str, **fields) -> Subscriber:
+    with _conn() as c:
+        sets = ", ".join(f"{k}=?" for k in fields)
+        c.execute(f"UPDATE subscribers SET {sets} WHERE uid=?", (*fields.values(), uid))
+    return get_subscriber(uid)

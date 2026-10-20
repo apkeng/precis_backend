@@ -11,8 +11,8 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app import analysis, quiz, store
-from app.auth import Caller, require_admin, require_ingest_access
+from app import analysis, mailer, payments, quiz, store
+from app.auth import Caller, Reader, require_admin, require_ingest_access, require_quiz_access, require_reader
 from app.config import settings
 from app.editions import process_edition
 from app.embeddings import LocalEmbeddingFunction
@@ -21,11 +21,14 @@ from app.llm import LLMGenerationError, SchemaValidationError
 from app.pdf_processor import extract_text_by_page
 from app.text_cleanup import clean_extracted_text
 from app.schemas import (
+    AccountOut,
+    AdminSubscribers,
     AdminArticles,
     AdminEditions,
     AdminMe,
     AskIn,
     AskResponse,
+    LoginEmailIn,
     ClippingIn,
     ClippingOut,
     EditionOut,
@@ -35,6 +38,8 @@ from app.schemas import (
     QuizIn,
     QuizResponse,
     StatsResponse,
+    SubscriberCounts,
+    SubscriberOut,
     TopicsResponse,
     TraceResponse,
 )
@@ -73,6 +78,16 @@ app.add_middleware(
 @app.exception_handler(SchemaValidationError)
 def llm_error_handler(_request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+@app.exception_handler(mailer.MailError)
+def mail_error_handler(_request, exc: Exception) -> JSONResponse:
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+@app.exception_handler(payments.PaymentsNotConfigured)
+def payments_unconfigured_handler(_request, exc: Exception) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.exception_handler(ValueError)
@@ -254,6 +269,60 @@ def admin_edition_articles(edition_id: str) -> AdminArticles:
     return AdminArticles(articles=store.edition_clippings(edition_id))
 
 
+def _subscriber_out(s: store.Subscriber) -> SubscriberOut:
+    return SubscriberOut(**s.__dict__, status=s.status(payments.today()))
+
+
+@app.get("/admin/subscribers", response_model=AdminSubscribers, dependencies=[Depends(require_admin)])
+def admin_subscribers() -> AdminSubscribers:
+    subs = [_subscriber_out(s) for s in store.list_subscribers()]
+    return AdminSubscribers(
+        counts=SubscriberCounts(
+            accounts=len(subs),
+            payment_confirmed=sum(s.payment_confirmed_at is not None for s in subs),
+            awaiting_activation=sum(s.status == "payment_pending" for s in subs),
+            active=sum(bool(s.access_until and s.access_until >= payments.today()) for s in subs),
+        ),
+        subscribers=subs,
+    )
+
+
+@app.post("/admin/subscribers/{uid}/login-email", response_model=SubscriberOut)
+def admin_send_login_email(uid: str, body: LoginEmailIn, caller: Caller = Depends(require_admin)) -> SubscriberOut:
+    """Grant `days` of quiz access (0 for none) and email the reader a link to sign in."""
+    try:
+        sub = store.get_subscriber(uid)
+    except store.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"No reader with id {uid!r}.") from exc
+    return _subscriber_out(payments.grant_and_email(sub, body.days, caller.label))
+
+
+# --- Reader accounts ---------------------------------------------------------
+
+
+def _account_out(reader: Reader, s: store.Subscriber) -> AccountOut:
+    today = payments.today()
+    return AccountOut(
+        email=s.email, name=s.name, internal=reader.internal, status=s.status(today),
+        quiz_access=reader.internal or bool(s.access_until and s.access_until >= today),
+        access_until=s.access_until, payment_confirmed_at=s.payment_confirmed_at, ref=s.ref,
+        price_inr=settings.subscription_price_inr, days=settings.subscription_days,
+    )
+
+
+@app.get("/account", response_model=AccountOut)
+def account(reader: Reader = Depends(require_reader)) -> AccountOut:
+    """The signed-in reader's account, created on first call."""
+    return _account_out(reader, store.upsert_subscriber(reader.uid, reader.email, reader.name))
+
+
+@app.post("/account/confirm-payment", response_model=AccountOut)
+def confirm_payment(reader: Reader = Depends(require_reader)) -> AccountOut:
+    """Email the reader a UPI QR code for the subscription."""
+    sub = store.upsert_subscriber(reader.uid, reader.email, reader.name)
+    return _account_out(reader, payments.confirm_payment(sub))
+
+
 # --- Reading -----------------------------------------------------------------
 
 
@@ -321,14 +390,14 @@ def trace(
 # --- Quizzes -----------------------------------------------------------------
 
 
-@app.get("/events/{event_id}/quiz", response_model=QuizResponse)
+@app.get("/events/{event_id}/quiz", response_model=QuizResponse, dependencies=[Depends(require_quiz_access)])
 def event_quiz(event_id: str) -> QuizResponse:
     event = _event_or_404(event_id)
     questions = quiz.event_quiz(event, QUESTION_FORMATS)
     return QuizResponse(questions=questions, requested=3)
 
 
-@app.post("/quizzes", response_model=QuizResponse)
+@app.post("/quizzes", response_model=QuizResponse, dependencies=[Depends(require_quiz_access)])
 def create_quiz(body: QuizIn) -> QuizResponse:
     events = store.list_events(body.date_from, body.date_to, body.topics)
     if body.event_ids is not None:

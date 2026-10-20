@@ -147,13 +147,14 @@ def test_trace_lists_direct_links_theme_events_and_outside_period(client, fake_c
     ]
 
 
-def test_quiz_drops_malformed_questions_and_respects_length(client, fake_claude):
+def test_quiz_drops_malformed_questions_and_respects_length(client, fake_claude, signed_in):
+    staff = signed_in("yadu@apokryfon.com")
     fake_claude.force_new = True
     ingest(client)
     ingest(client, date="2026-09-20", title="Second cyclone forms")
 
     body = {**SEP, "topics": ["geo"], "formats": ["MCQ"], "length": 10, "difficulty": "Mixed"}
-    resp = client.post("/quizzes", json=body)
+    resp = client.post("/quizzes", json=body, headers=staff)
     assert resp.status_code == 200, resp.text
     quiz = resp.json()
     assert quiz["requested"] == 10
@@ -163,23 +164,25 @@ def test_quiz_drops_malformed_questions_and_respects_length(client, fake_claude)
     assert q["answer"] == 0
     assert q["source"]["paper"] == "The Courier"
 
-    short = client.post("/quizzes", json={**body, "length": 1}).json()
+    short = client.post("/quizzes", json={**body, "length": 1}, headers=staff).json()
     assert len(short["questions"]) == 1
 
 
-def test_quiz_rejects_bad_input_and_empty_selection(client, fake_claude):
+def test_quiz_rejects_bad_input_and_empty_selection(client, fake_claude, signed_in):
+    staff = signed_in("yadu@apokryfon.com")
     base = {**SEP, "topics": ["geo"], "formats": ["MCQ"], "length": 5, "difficulty": "Mixed"}
-    assert client.post("/quizzes", json={**base, "topics": ["nope"]}).status_code == 422
-    assert client.post("/quizzes", json={**base, "formats": ["Essay"]}).status_code == 422
-    assert client.post("/quizzes", json={**base, "topics": []}).status_code == 422
-    assert client.post("/quizzes", json=base).status_code == 409  # nothing ingested
+    assert client.post("/quizzes", json={**base, "topics": ["nope"]}, headers=staff).status_code == 422
+    assert client.post("/quizzes", json={**base, "formats": ["Essay"]}, headers=staff).status_code == 422
+    assert client.post("/quizzes", json={**base, "topics": []}, headers=staff).status_code == 422
+    assert client.post("/quizzes", json=base, headers=staff).status_code == 409  # nothing ingested
 
 
-def test_event_quiz_is_cached(client, fake_claude):
+def test_event_quiz_is_cached(client, fake_claude, signed_in):
+    staff = signed_in("yadu@apokryfon.com")
     clipping = ingest(client)
-    first = client.get(f"/events/{clipping.event_id}/quiz").json()
+    first = client.get(f"/events/{clipping.event_id}/quiz", headers=staff).json()
     calls = len(fake_claude.calls)
-    second = client.get(f"/events/{clipping.event_id}/quiz").json()
+    second = client.get(f"/events/{clipping.event_id}/quiz", headers=staff).json()
     assert first == second
     assert len(fake_claude.calls) == calls
 
