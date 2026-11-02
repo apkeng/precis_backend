@@ -1,4 +1,6 @@
-from app import store
+from app import analysis, store
+from app import quiz as quiz_module
+from app.llm import LLMGenerationError
 from app.config import settings
 from tests.conftest import KEY_HEADERS, ingest
 
@@ -102,20 +104,6 @@ def test_unknown_event_is_404(client):
     assert client.get("/events/nope").status_code == 404
 
 
-def test_ask_returns_answer_with_sources(client, fake_claude):
-    clipping = ingest(client)
-    resp = client.post(
-        f"/events/{clipping.event_id}/ask", json={"question": "How many evacuated?", **SEP}
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["answer"] == "The sources say so [1]."
-    assert body["foundInSources"] is True
-    assert body["sources"] == [
-        {"n": 1, "paper": "The Courier", "date": "2026-09-28", "title": "Cyclone makes landfall in Odisha"}
-    ]
-
-
 def test_trace_lists_direct_links_theme_events_and_outside_period(client, fake_claude):
     fake_claude.force_new = True
     fake_claude.unlinked_words = {"Earthquake"}
@@ -147,25 +135,38 @@ def test_trace_lists_direct_links_theme_events_and_outside_period(client, fake_c
     ]
 
 
-def test_quiz_drops_malformed_questions_and_respects_length(client, fake_claude, signed_in):
+def test_quiz_is_assembled_from_event_pools(client, fake_claude, signed_in):
     staff = signed_in("yadu@apokryfon.com")
     fake_claude.force_new = True
-    ingest(client)
-    ingest(client, date="2026-09-20", title="Second cyclone forms")
+    first = ingest(client)
+    second = ingest(client, date="2026-09-20", title="Second cyclone forms")
+    for c in (first, second):  # writes each event's question pool
+        assert client.get(f"/events/{c.event_id}/quiz", headers=staff).status_code == 200
 
+    calls = len(fake_claude.calls)
     body = {**SEP, "topics": ["geo"], "formats": ["MCQ"], "length": 10, "difficulty": "Mixed"}
     resp = client.post("/quizzes", json=body, headers=staff)
     assert resp.status_code == 200, resp.text
+    assert len(fake_claude.calls) == calls  # assembled from the pools, no Claude call
     quiz = resp.json()
     assert quiz["requested"] == 10
-    assert len(quiz["questions"]) == 2  # the malformed third one is dropped
+    # Two events x MCQ at both difficulties; the malformed question was dropped.
+    assert len(quiz["questions"]) == 4
+    assert all(q["type"] == "MCQ" and q["stem"] != "Bad?" for q in quiz["questions"])
+    # Spread across events: the first two come from different events.
+    assert quiz["questions"][0]["eventId"] != quiz["questions"][1]["eventId"]
     q = quiz["questions"][0]
     assert q["topic"] == "geo"
     assert q["answer"] == 0
     assert q["source"]["paper"] == "The Courier"
 
+    easy = client.post("/quizzes", json={**body, "difficulty": "Easy"}, headers=staff).json()
+    assert [q["stem"].split()[0] for q in easy["questions"]] == ["Easy", "Easy"]
     short = client.post("/quizzes", json={**body, "length": 1}, headers=staff).json()
     assert len(short["questions"]) == 1
+    # Only the pooled questions matching format and difficulty: one per event.
+    none = client.post("/quizzes", json={**body, "formats": ["Match"], "difficulty": "Hard"}, headers=staff)
+    assert [q["type"] for q in none.json()["questions"]] == ["Match", "Match"]
 
 
 def test_quiz_rejects_bad_input_and_empty_selection(client, fake_claude, signed_in):
@@ -177,14 +178,92 @@ def test_quiz_rejects_bad_input_and_empty_selection(client, fake_claude, signed_
     assert client.post("/quizzes", json=base, headers=staff).status_code == 409  # nothing ingested
 
 
+def test_quiz_drafts_pools_for_events_without_one(client, fake_claude, signed_in, monkeypatch):
+    staff = signed_in("yadu@apokryfon.com")
+    fake_claude.force_new = True
+    events = [
+        ingest(client, date=f"2026-09-{day}", title=f"Cyclone number {day}").event_id
+        for day in ("10", "11", "12", "13")
+    ]
+    monkeypatch.setattr(settings, "quiz_fallback_events", 3)
+
+    def pool_calls():
+        return sum("questions" in props for props, _ in fake_claude.calls)
+
+    # MCQ only, Mixed: 2 usable questions per pool, so 3 more are 2 pools.
+    body = {**SEP, "topics": ["geo"], "formats": ["MCQ"], "length": 3, "difficulty": "Mixed"}
+    resp = client.post("/quizzes", json=body, headers=staff)
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["questions"]) == 3
+    assert pool_calls() == 2
+    pooled = [e for e in events if store.get_event(e).caches.get("quiz") is not None]
+    assert len(pooled) == 2  # kept for later quizzes
+
+    # Same quiz again: served from the saved pools.
+    client.post("/quizzes", json=body, headers=staff)
+    assert pool_calls() == 2
+    # A longer one drafts at most QUIZ_FALLBACK_EVENTS more.
+    resp = client.post("/quizzes", json={**body, "length": 30}, headers=staff)
+    assert len(resp.json()["questions"]) == 8  # 4 events x 2 MCQs
+    assert pool_calls() == 4
+
+
+def test_quiz_fallback_failure_is_an_error_only_with_nothing_to_show(client, fake_claude, signed_in, monkeypatch):
+    staff = signed_in("yadu@apokryfon.com")
+    ingest(client)
+
+    def overloaded(system, prompt, schema, effort="medium"):
+        raise LLMGenerationError("overloaded")
+
+    monkeypatch.setattr(quiz_module.llm, "generate_json", overloaded)
+    body = {**SEP, "topics": ["geo"], "formats": ["MCQ"], "length": 5, "difficulty": "Mixed"}
+    resp = client.post("/quizzes", json=body, headers=staff)
+    assert resp.status_code == 502, resp.text
+
+
 def test_event_quiz_is_cached(client, fake_claude, signed_in):
     staff = signed_in("yadu@apokryfon.com")
     clipping = ingest(client)
     first = client.get(f"/events/{clipping.event_id}/quiz", headers=staff).json()
+    assert first["requested"] == 3
+    # One question per format where the pool allows.
+    assert len({q["type"] for q in first["questions"]}) == 3
     calls = len(fake_claude.calls)
     second = client.get(f"/events/{clipping.event_id}/quiz", headers=staff).json()
     assert first == second
     assert len(fake_claude.calls) == calls
+
+
+def test_ingestion_pregenerates_event_outputs(client, fake_claude, monkeypatch):
+    monkeypatch.setattr(settings, "pregenerate", True)
+    clipping = ingest(client)
+    caches = store.get_event(clipping.event_id).caches
+    assert set(caches) == {"analysis", "framing", "quiz"}
+    assert caches["quiz"]
+
+    # Readers are served from the cache.
+    calls = len(fake_claude.calls)
+    assert client.get(f"/events/{clipping.event_id}").status_code == 200
+    assert len(fake_claude.calls) == calls
+
+    # A new clipping on the event clears and re-writes them.
+    ingest(client, paper="Metro Times")
+    assert set(store.get_event(clipping.event_id).caches) == {"analysis", "framing", "quiz"}
+
+
+def test_failed_pregeneration_leaves_event_for_on_view(client, fake_claude, monkeypatch):
+    monkeypatch.setattr(settings, "pregenerate", True)
+    real = fake_claude.__call__
+
+    def no_analysis(system, prompt, schema, effort="medium"):
+        if "what_happened" in schema["properties"]:
+            raise RuntimeError("overloaded")
+        return real(system, prompt, schema, effort)
+
+    monkeypatch.setattr(analysis.llm, "generate_json", no_analysis)
+    clipping = ingest(client)
+    assert store.get_clipping(clipping.id).status == "ready"
+    assert "analysis" not in store.get_event(clipping.event_id).caches
 
 
 def test_ingest_needs_the_key(client, fake_claude, monkeypatch):

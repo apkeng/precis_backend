@@ -1,6 +1,6 @@
 """Claude-written views of an event, grounded in its clippings: the event
-analysis, how each paper framed it, answers to "Ask the sources", and the
-related-event links behind the story analysis screen.
+analysis, how each paper framed it, and the related-event links behind the
+story analysis screen.
 
 Sources are numbered [1]..[n] in the order `store.event_clippings` returns
 them, and every citation Claude writes refers to that numbering - the
@@ -142,55 +142,6 @@ def framing(event: store.Event) -> list[dict]:
         out.append({**item, "clipping_count": counts[item["paper"]]})
     store.set_event_cache(event.id, "framing", out)
     return out
-
-
-# --- Ask the sources ---------------------------------------------------------
-
-ASK_SCHEMA = {
-    "type": "object",
-    "properties": {"answer": {"type": "string"}, "found_in_sources": {"type": "boolean"}},
-    "required": ["answer", "found_in_sources"],
-}
-
-ASK_SYSTEM_PROMPT = f"""You answer a civil-services aspirant's question about \
-a news event. {GROUNDING_RULES}
-
-Keep the answer to 2-4 sentences. If the sources don't answer the question, \
-set found_in_sources to false and say briefly what they do and don't cover."""
-
-
-def ask(event: store.Event, question: str, date_from: str, date_to: str) -> dict:
-    """Retrieve passages from clippings in the period (this event's first),
-    then answer only from them. Returns the answer and the numbered sources
-    its [n] citations refer to."""
-    query = f"{event.title}\n{question}"
-    hits = vector_store.query_clippings(query, settings.default_top_k // 2 or 1, event_id=event.id)
-    hits += vector_store.query_clippings(query, settings.default_top_k, date_from, date_to)
-
-    # Group passages by clipping so each source number is one clipping.
-    passages: dict[str, list[str]] = {}
-    for hit in hits:
-        texts = passages.setdefault(hit["clipping_id"], [])
-        if hit["text"] not in texts:
-            texts.append(hit["text"])
-    clippings = [store.get_clipping(cid) for cid in passages]
-    block = "\n\n".join(
-        f"[{i}] {c.paper}, {c.date} - {c.title}\n" + "\n...\n".join(passages[c.id])
-        for i, c in enumerate(clippings, start=1)
-    ) or "(No clippings in this period matched the question.)"
-
-    result = llm.generate_json(
-        ASK_SYSTEM_PROMPT, f"Event: {event.title}\n\nSources:\n{block}\n\nQuestion: {question}", ASK_SCHEMA
-    )
-    return {
-        "question": question,
-        "answer": _drop_bad_cites(result["answer"], len(clippings)),
-        "found_in_sources": result["found_in_sources"],
-        "sources": [
-            {"n": i, "paper": c.paper, "date": c.date, "title": c.title}
-            for i, c in enumerate(clippings, start=1)
-        ],
-    }
 
 
 # --- Related events (story analysis) -----------------------------------------

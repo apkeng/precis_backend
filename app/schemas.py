@@ -200,28 +200,6 @@ class EventDetail(EventSummary):
     analysis: AnalysisOut
 
 
-class AskIn(CamelModel):
-    question: str = Field(..., min_length=1, max_length=500)
-    date_from: str = Field(..., alias="from")
-    date_to: str = Field(..., alias="to")
-
-    _check_dates = field_validator("date_from", "date_to")(_iso)
-
-
-class AskSource(CamelModel):
-    n: int
-    paper: str
-    date: str
-    title: str
-
-
-class AskResponse(CamelModel):
-    question: str
-    answer: str
-    found_in_sources: bool
-    sources: list[AskSource]
-
-
 class RelatedOut(CamelModel):
     event: EventSummary
     kind: str  # "direct" | "theme"

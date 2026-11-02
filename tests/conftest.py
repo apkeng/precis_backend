@@ -75,8 +75,6 @@ class FakeClaude:
         if "papers" in props:
             papers = props["papers"]["items"]["properties"]["paper"]["enum"]
             return {"papers": [{"paper": p, "angle": "An angle", "tone": "Neutral"} for p in papers]}
-        if "answer" in props:
-            return {"answer": "The sources say so [1].", "found_in_sources": True}
         if "links" in props:
             ids = props["links"]["items"]["properties"]["event_id"]["enum"]
             lines = {i: next(l for l in prompt.splitlines() if l.startswith(f"- {i}")) for i in ids}
@@ -85,21 +83,21 @@ class FakeClaude:
                 for i in ids
             ]}
         if "questions" in props:
+            # A pool for one event: every format at both difficulties, plus
+            # one malformed question that must be dropped.
             item = props["questions"]["items"]["properties"]
-            erefs = item["event_ref"]["enum"]
-            # S-refs are numbered in event order, so E{n}'s first source is the
-            # first S after the previous events' sources.
-            first_source = {e: s for e, s in re.findall(r"Event (E\d+).*?\[(S\d+)\]", prompt, re.S)}
-            topic = item["topic"]["enum"][0]
-            qs = []
-            for e in erefs:
-                qs.append({
-                    "event_ref": e, "source_ref": first_source[e], "topic": topic,
-                    "type": item["type"]["enum"][0], "stem": f"Question on {e}?", "statements": [],
-                    "options": ["a", "b", "c", "d"], "answer_index": 0, "explanation": "Because.",
-                })
-            # One malformed question, which must be dropped.
-            qs.append({**qs[0], "stem": "Bad?", "options": ["a", "b"]})
+            title = re.search(r"^Event \([^)]*\): (.*)$", prompt, re.M).group(1)
+            qs = [
+                {
+                    "source_ref": item["source_ref"]["enum"][0], "topic": item["topic"]["enum"][0],
+                    "type": fmt, "difficulty": level, "stem": f"{level} {fmt} on {title}?",
+                    "statements": [], "options": ["a", "b", "c", "d"], "answer_index": 0,
+                    "explanation": "Because.",
+                }
+                for fmt in item["type"]["enum"]
+                for level in item["difficulty"]["enum"]
+            ]
+            qs.insert(0, {**qs[0], "stem": "Bad?", "options": ["a", "b"]})
             return {"questions": qs}
         raise AssertionError(f"Unexpected schema: {sorted(props)}")
 
@@ -111,6 +109,9 @@ def isolated_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "ingest_api_key", INGEST_KEY)
     monkeypatch.setattr(settings, "firebase_project_id", "precis-test")
     monkeypatch.setattr(settings, "admin_email_domain", "apokryfon.com")
+    # Off by default so tests see exactly the Claude calls they trigger;
+    # tests of pre-generation turn it on.
+    monkeypatch.setattr(settings, "pregenerate", False)
     monkeypatch.setattr(vector_store, "_embedding_fn", _FakeEmbeddingFunction())
     vector_store._client = None
     yield

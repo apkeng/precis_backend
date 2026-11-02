@@ -57,8 +57,8 @@ def test_quizzes_need_a_sign_in_and_an_active_subscription(client, fake_claude, 
     assert client.get(f"/events/{clipping.event_id}/quiz", headers=reader).status_code == 402
 
     store.update_subscriber("uid-asha@gmail.com", access_until=date.today().isoformat())
-    assert client.post("/quizzes", json=QUIZ, headers=reader).status_code == 200
     assert client.get(f"/events/{clipping.event_id}/quiz", headers=reader).status_code == 200
+    assert client.post("/quizzes", json=QUIZ, headers=reader).status_code == 200
 
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     store.update_subscriber("uid-asha@gmail.com", access_until=yesterday)

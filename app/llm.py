@@ -13,6 +13,7 @@ recommended fallback model inside the same call instead of failing.
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import anthropic
@@ -29,6 +30,11 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_ATTEMPTS = 4
 RETRY_BASE_SECONDS = 2.0
 _TRANSIENT_ERROR_TYPES = {"overloaded_error", "api_error", "rate_limit_error"}
+
+# Caps Claude calls in flight across every thread (reader requests and
+# background ingestion), so a busy spell queues here instead of turning into
+# a burst of rate-limit errors. Held per attempt, not during retry back-off.
+_slots = threading.BoundedSemaphore(settings.claude_max_concurrency)
 
 
 class LLMGenerationError(RuntimeError):
@@ -89,7 +95,8 @@ def _is_transient(exc: Exception) -> bool:
 def _call_claude(system_prompt: str, prompt: str, output_schema: dict, effort: str) -> str:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            return _call_claude_once(system_prompt, prompt, output_schema, effort)
+            with _slots:
+                return _call_claude_once(system_prompt, prompt, output_schema, effort)
         except LLMGenerationError as exc:
             if attempt == MAX_ATTEMPTS or not _is_transient(exc.__cause__):
                 raise

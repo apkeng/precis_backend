@@ -15,6 +15,7 @@ from __future__ import annotations
 from app import llm, store
 from app.ingestion import process_clipping
 from app.pdf_processor import extract_text_by_page
+from app.pregenerate import prepare_edition
 from app.text_cleanup import clean_extracted_text
 
 INGESTED_KINDS = ("news", "opinion")
@@ -87,6 +88,8 @@ def process_edition(edition_id: str, pdf_bytes: bytes) -> None:
         status="ready" if len(page_errors) < len(pages) else "failed",
         error="; ".join(page_errors) or None,
     )
+    # After every page, so each event is written once from all its new clippings.
+    prepare_edition(edition_id)
 
 
 def _ingest_page(edition: store.Edition, page_number: int, text: str) -> None:

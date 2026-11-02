@@ -2,7 +2,7 @@
 
 Same stack as Newspaper_ingestion: embeddings (sentence-transformers) and the
 vector store (Chroma) are free and local; Claude does the reading - topic
-tagging, event matching, analysis, "ask the sources" and quiz drafting.
+tagging, event matching, analysis and quiz drafting.
 """
 import os
 
@@ -19,6 +19,13 @@ class Settings:
     # Only needed for an API key that isn't scoped to a workspace - the API
     # then rejects every request unless it names one via this header.
     anthropic_workspace_id: str = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+    # Most Claude calls in flight at once, across readers and ingestion; the
+    # rest wait their turn. Keep it under the account's rate limits.
+    claude_max_concurrency: int = _int("CLAUDE_MAX_CONCURRENCY", 16)
+    # Worker threads for reader requests that may need Claude (event pages,
+    # chronology, event quizzes). Kept apart from FastAPI's default pool so a
+    # queue of slow Claude calls never holds up cheap reads like the event list.
+    claude_route_threads: int = _int("CLAUDE_ROUTE_THREADS", 64)
 
     # Local embedding model (sentence-transformers) - same model as
     # Newspaper_ingestion, downloaded once, then runs on CPU.
@@ -37,8 +44,6 @@ class Settings:
     chunk_size: int = _int("CHUNK_SIZE", 1500)
     chunk_overlap: int = _int("CHUNK_OVERLAP", 200)
 
-    # Retrieval defaults.
-    default_top_k: int = _int("DEFAULT_TOP_K", 8)
     # How many nearby events Claude is shown when deciding whether a new
     # clipping belongs to an existing event, and how far apart (days) they
     # may be.
@@ -47,9 +52,19 @@ class Settings:
     # How many candidate events the story-analysis screen asks Claude to
     # check for a direct link.
     trace_candidates: int = _int("TRACE_CANDIDATES", 8)
-    # Cap on events (and clippings per event) sent to Claude for one quiz.
-    quiz_max_events: int = _int("QUIZ_MAX_EVENTS", 24)
+    # Clippings per event sent to Claude when drafting the event's question
+    # pool, and how many questions a pool aims for. Custom quizzes are
+    # assembled from these pools.
     quiz_clippings_per_event: int = _int("QUIZ_CLIPPINGS_PER_EVENT", 2)
+    quiz_pool_size: int = _int("QUIZ_POOL_SIZE", 8)
+    # When a custom quiz is short of pooled questions, the most events it may
+    # draft pools for on the spot (in parallel; each is one Claude call).
+    quiz_fallback_events: int = _int("QUIZ_FALLBACK_EVENTS", 6)
+    # Write each event's analysis, framing and question pool right after
+    # ingestion, so readers don't wait on Claude for them. Events are prepared
+    # PREGENERATE_WORKERS at a time (still within CLAUDE_MAX_CONCURRENCY).
+    pregenerate: bool = os.environ.get("PREGENERATE", "1").strip().lower() not in ("0", "false", "no", "")
+    pregenerate_workers: int = _int("PREGENERATE_WORKERS", 4)
     excerpt_chars: int = _int("EXCERPT_CHARS", 2400)
     trace_max_days: int = _int("TRACE_MAX_DAYS", 120)
 

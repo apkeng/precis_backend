@@ -1,10 +1,20 @@
 """FastAPI app for Précis: ingest newspaper clippings into events, then serve
-event analysis, story tracing, "ask the sources" and quizzes - all grounded
-in the clippings of the period the reader picked."""
+event analysis, story tracing and quizzes - all grounded in the clippings of
+the period the reader picked.
+
+Routes that may have to wait on Claude run in their own thread pool
+(`_claude_route`), so a queue of slow Claude calls never holds up cheap reads
+such as the event list. Ingestion pre-generates each event's outputs (see
+app/pregenerate.py), so those routes are usually just reading the cache."""
 from __future__ import annotations
 
+import functools
 import re
 from contextlib import asynccontextmanager
+from typing import Callable, TypeVar
+
+import anyio
+import anyio.to_thread
 from datetime import date
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
@@ -18,6 +28,7 @@ from app.editions import process_edition
 from app.embeddings import LocalEmbeddingFunction
 from app.ingestion import process_clipping
 from app.llm import LLMGenerationError, SchemaValidationError
+from app.pregenerate import prepare_events
 from app.pdf_processor import extract_text_by_page
 from app.text_cleanup import clean_extracted_text
 from app.schemas import (
@@ -26,8 +37,6 @@ from app.schemas import (
     AdminArticles,
     AdminEditions,
     AdminMe,
-    AskIn,
-    AskResponse,
     LoginEmailIn,
     ClippingIn,
     ClippingOut,
@@ -65,6 +74,19 @@ app = FastAPI(
     ),
     version="0.1.0",
 )
+
+_T = TypeVar("_T")
+_claude_limiter: anyio.CapacityLimiter | None = None
+
+
+async def _claude_route(fn: Callable[..., _T], *args) -> _T:
+    """Run `fn(*args)` - sync code that may call Claude - in the thread pool
+    kept for such work. Waiting for a free thread there costs no thread."""
+    global _claude_limiter
+    if _claude_limiter is None:
+        _claude_limiter = anyio.CapacityLimiter(settings.claude_route_threads)
+    return await anyio.to_thread.run_sync(functools.partial(fn, *args), limiter=_claude_limiter)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -166,8 +188,13 @@ def _clipping_out(c: store.Clipping) -> ClippingOut:
 @app.post("/clippings", response_model=ClippingOut, status_code=202, dependencies=[Depends(require_ingest_access)])
 def ingest_clipping(body: ClippingIn, background_tasks: BackgroundTasks) -> ClippingOut:
     clipping = store.create_clipping(body.paper, body.date, body.page, body.title, body.text)
-    background_tasks.add_task(process_clipping, clipping.id)
+    background_tasks.add_task(_process_and_prepare, clipping.id)
     return _clipping_out(clipping)
+
+
+def _process_and_prepare(clipping_id: str) -> None:
+    process_clipping(clipping_id)
+    prepare_events([store.get_clipping(clipping_id).event_id])
 
 
 def _ingest_pdf(clipping_id: str, pdf_bytes: bytes) -> None:
@@ -177,7 +204,7 @@ def _ingest_pdf(clipping_id: str, pdf_bytes: bytes) -> None:
         store.set_clipping_status(clipping_id, "failed", str(exc))
         return
     store.set_clipping_text(clipping_id, text)
-    process_clipping(clipping_id)
+    _process_and_prepare(clipping_id)
 
 
 @app.post(
@@ -347,7 +374,11 @@ def list_events(
 
 
 @app.get("/events/{event_id}", response_model=EventDetail)
-def get_event(event_id: str) -> EventDetail:
+async def get_event(event_id: str) -> EventDetail:
+    return await _claude_route(_event_detail, event_id)
+
+
+def _event_detail(event_id: str) -> EventDetail:
     event = _event_or_404(event_id)
     clippings = store.event_clippings(event.id)
     return EventDetail(
@@ -361,20 +392,18 @@ def get_event(event_id: str) -> EventDetail:
     )
 
 
-@app.post("/events/{event_id}/ask", response_model=AskResponse)
-def ask(event_id: str, body: AskIn) -> AskResponse:
-    event = _event_or_404(event_id)
-    return AskResponse(**analysis.ask(event, body.question, body.date_from, body.date_to))
-
-
 @app.get("/events/{event_id}/trace", response_model=TraceResponse)
-def trace(
+async def trace(
     event_id: str,
     date_from: str = Query(..., alias="from"),
     date_to: str = Query(..., alias="to"),
 ) -> TraceResponse:
     _date_param(date_from, "from")
     _date_param(date_to, "to")
+    return await _claude_route(_trace, event_id, date_from, date_to)
+
+
+def _trace(event_id: str, date_from: str, date_to: str) -> TraceResponse:
     event = _event_or_404(event_id)
     rel = analysis.related_events(event, date_from, date_to)
     return TraceResponse(
@@ -391,14 +420,23 @@ def trace(
 
 
 @app.get("/events/{event_id}/quiz", response_model=QuizResponse, dependencies=[Depends(require_quiz_access)])
-def event_quiz(event_id: str) -> QuizResponse:
+async def event_quiz(event_id: str) -> QuizResponse:
+    return await _claude_route(_event_quiz, event_id)
+
+
+def _event_quiz(event_id: str) -> QuizResponse:
     event = _event_or_404(event_id)
     questions = quiz.event_quiz(event, QUESTION_FORMATS)
-    return QuizResponse(questions=questions, requested=3)
+    return QuizResponse(questions=questions, requested=quiz.EVENT_QUIZ_LENGTH)
 
 
 @app.post("/quizzes", response_model=QuizResponse, dependencies=[Depends(require_quiz_access)])
-def create_quiz(body: QuizIn) -> QuizResponse:
+async def create_quiz(body: QuizIn) -> QuizResponse:
+    # Usually just reads pools, but may draft some for older events.
+    return await _claude_route(_create_quiz, body)
+
+
+def _create_quiz(body: QuizIn) -> QuizResponse:
     events = store.list_events(body.date_from, body.date_to, body.topics)
     if body.event_ids is not None:
         wanted = set(body.event_ids)
@@ -406,7 +444,7 @@ def create_quiz(body: QuizIn) -> QuizResponse:
     if not events:
         raise HTTPException(status_code=409, detail="No events in this period match the selected topics.")
     try:
-        questions = quiz.generate(events, body.topics, body.formats, body.length, body.difficulty)
+        questions = quiz.build(events, body.topics, body.formats, body.length, body.difficulty)
     except quiz.NoMaterialError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return QuizResponse(questions=questions, requested=body.length)

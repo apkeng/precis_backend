@@ -162,3 +162,29 @@ def test_non_transient_errors_are_not_retried(monkeypatch):
     with pytest.raises(llm.LLMGenerationError):
         llm.generate_json("sys", "q?", SCHEMA)
     assert len(calls) == 1
+
+
+def test_concurrent_calls_are_capped(monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(llm, "_slots", threading.BoundedSemaphore(2))
+    lock, state = threading.Lock(), {"now": 0, "peak": 0}
+
+    def slow_call(*_args):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        time.sleep(0.05)
+        with lock:
+            state["now"] -= 1
+        return '{"ok": true}'
+
+    monkeypatch.setattr(llm, "_call_claude_once", slow_call)
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
+    threads = [threading.Thread(target=llm.generate_json, args=("s", "p", schema)) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert state["peak"] == 2

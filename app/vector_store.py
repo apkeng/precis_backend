@@ -3,9 +3,10 @@
 Two collections, both embedded with the same local sentence-transformers
 model as Newspaper_ingestion:
 
-  - `clippings`: chunks of every clipping, used to retrieve passages for
-    "Ask the sources". Metadata carries the clipping, its event, paper and
-    date, so retrieval can be confined to a date range or one event.
+  - `clippings`: chunks of every clipping, for passage retrieval
+    (`query_clippings`; no reader feature uses it since "Ask the sources"
+    was removed). Metadata carries the clipping, its event, paper and date,
+    so retrieval can be confined to a date range or one event.
   - `events`: one vector per event (title + dek), used to find the event a
     new clipping belongs to and the events related to a story.
 
