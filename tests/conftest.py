@@ -45,7 +45,7 @@ class FakeClaude:
         self.unlinked_words: set[str] = set()
         self.force_new = False
 
-    def __call__(self, system, prompt, schema, effort="medium"):
+    def __call__(self, system, prompt, schema, effort="medium", attachments=None):
         props = schema["properties"]
         self.calls.append((set(props), prompt))
         if "relevant" in props:

@@ -92,11 +92,11 @@ def _is_transient(exc: Exception) -> bool:
     return False
 
 
-def _call_claude(system_prompt: str, prompt: str, output_schema: dict, effort: str) -> str:
+def _call_claude(system_prompt: str, prompt: str, output_schema: dict, effort: str, attachments=None) -> str:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             with _slots:
-                return _call_claude_once(system_prompt, prompt, output_schema, effort)
+                return _call_claude_once(system_prompt, prompt, output_schema, effort, attachments)
         except LLMGenerationError as exc:
             if attempt == MAX_ATTEMPTS or not _is_transient(exc.__cause__):
                 raise
@@ -104,8 +104,10 @@ def _call_claude(system_prompt: str, prompt: str, output_schema: dict, effort: s
     raise AssertionError("unreachable")
 
 
-def _call_claude_once(system_prompt: str, prompt: str, output_schema: dict, effort: str) -> str:
+def _call_claude_once(system_prompt: str, prompt: str, output_schema: dict, effort: str, attachments=None) -> str:
     client = _get_anthropic_client()
+    # Scanned pages ride along as image/document blocks ahead of the prompt.
+    content = [*attachments, {"type": "text", "text": prompt}] if attachments else prompt
     try:
         # Streamed so long outputs (a 20-question quiz) can't hit the HTTP
         # timeout; get_final_message() assembles the whole response.
@@ -113,7 +115,7 @@ def _call_claude_once(system_prompt: str, prompt: str, output_schema: dict, effo
             model=settings.anthropic_model,
             max_tokens=settings.anthropic_max_tokens,
             system=system_prompt,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": content}],
             output_config={
                 "effort": effort,
                 "format": {"type": "json_schema", "schema": output_schema},
@@ -150,10 +152,17 @@ def _call_claude_once(system_prompt: str, prompt: str, output_schema: dict, effo
     return text
 
 
-def generate_json(system_prompt: str, prompt: str, output_schema: dict, effort: str = "medium") -> dict:
-    """Ask Claude for a JSON object matching `output_schema`."""
+def generate_json(
+    system_prompt: str,
+    prompt: str,
+    output_schema: dict,
+    effort: str = "medium",
+    attachments: list[dict] | None = None,
+) -> dict:
+    """Ask Claude for a JSON object matching `output_schema`. `attachments`
+    are extra content blocks (scanned page images or PDFs) sent before the prompt."""
     output_schema = strict_schema(output_schema)
-    raw_content = _call_claude(system_prompt, prompt, output_schema, effort)
+    raw_content = _call_claude(system_prompt, prompt, output_schema, effort, attachments)
 
     # `output_config.format` already guarantees schema-valid JSON, but we
     # validate anyway as a defensive check rather than trusting it blindly.

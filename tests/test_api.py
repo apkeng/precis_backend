@@ -1,3 +1,4 @@
+from app.pdf_processor import Page
 from app import analysis, store
 from app import quiz as quiz_module
 from app.llm import LLMGenerationError
@@ -279,7 +280,7 @@ def test_ingest_needs_the_key(client, fake_claude, monkeypatch):
 def test_pdf_ingest_reads_text(client, fake_claude, monkeypatch):
     import app.main as main_module
 
-    monkeypatch.setattr(main_module, "extract_text_by_page", lambda b: ["Cyclone hits Odisha coast."])
+    monkeypatch.setattr(main_module, "load_pages", lambda b: [Page(text="Cyclone hits Odisha coast.")])
     resp = client.post(
         "/clippings/pdf",
         files={"file": ("c.pdf", b"%PDF-1.4 fake", "application/pdf")},

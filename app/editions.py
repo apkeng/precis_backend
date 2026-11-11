@@ -1,5 +1,5 @@
-"""Whole-edition ingestion: an e-paper PDF (every page of one day's paper)
-is split into articles, and each article becomes a clipping that goes
+"""Whole-edition ingestion: an e-paper PDF (every page of one day's paper),
+or a scan/photos of a printed paper, is split into articles, and each article becomes a clipping that goes
 through the normal tag-and-match step (app/ingestion.py).
 
 PDF text comes out in column order with several stories per page, so Claude
@@ -9,12 +9,15 @@ pieces are ingested - adverts, indexes, captions, sport and entertainment
 are dropped here, before any per-article tagging cost. A story continued
 onto another page becomes two clippings, which the event matcher then
 joins into one event.
+
+A scanned page (no text layer) is sent to Claude as images instead of
+text, and the same call reads and splits it.
 """
 from __future__ import annotations
 
 from app import llm, store
 from app.ingestion import process_clipping
-from app.pdf_processor import extract_text_by_page
+from app.pdf_processor import Page, content_blocks, load_pages
 from app.pregenerate import prepare_edition
 from app.text_cleanup import clean_extracted_text
 
@@ -62,23 +65,30 @@ reword it. For "other" items, text may be empty.
 A roundup or briefs column ("News in Numbers", "In Brief", "World Briefs" \
 and the like) is several unrelated items under one section label. Return \
 each item as its own article, with the item's own headline - never the \
-column as one article."""
+column as one article.
+
+Sometimes the page comes as a scan (images, or a PDF page without a text \
+layer) instead of extracted text. Then read the articles off the image under \
+the same rules: transcribe each article's text faithfully, joining words \
+hyphenated across lines; where a word is illegible, give your best reading \
+rather than a placeholder."""
 
 
-def process_edition(edition_id: str, pdf_bytes: bytes) -> None:
-    """Runs as a background task after the upload response has been sent."""
+def process_edition(edition_id: str, uploads: list[bytes]) -> None:
+    """Runs as a background task after the upload response has been sent.
+    `uploads` is one PDF, or several page images in page order."""
     edition = store.get_edition(edition_id)
     try:
-        pages = extract_text_by_page(pdf_bytes)
+        pages = load_pages(uploads)
     except Exception as exc:  # noqa: BLE001 - surfaced through the edition's status
         store.update_edition(edition_id, status="failed", error=str(exc))
         return
     store.update_edition(edition_id, pages=len(pages))
 
     page_errors = []
-    for page_number, raw in enumerate(pages, start=1):
+    for page_number, page in enumerate(pages, start=1):
         try:
-            _ingest_page(edition, page_number, clean_extracted_text(raw))
+            _ingest_page(edition, page_number, page)
         except Exception as exc:  # noqa: BLE001 - one bad page shouldn't stop the edition
             page_errors.append(f"page {page_number}: {exc}")
         store.update_edition(edition_id, pages_done=page_number)
@@ -92,15 +102,23 @@ def process_edition(edition_id: str, pdf_bytes: bytes) -> None:
     prepare_edition(edition_id)
 
 
-def _ingest_page(edition: store.Edition, page_number: int, text: str) -> None:
-    if not text.strip():
-        return
-    result = llm.generate_json(
-        SEGMENT_SYSTEM_PROMPT,
-        f"{edition.paper}, {edition.date}, page {page_number}:\n\n{text}",
-        SEGMENT_SCHEMA,
-        effort="low",
-    )
+def _ingest_page(edition: store.Edition, page_number: int, page: Page) -> None:
+    header = f"{edition.paper}, {edition.date}, page {page_number}"
+    if page.scanned:
+        result = llm.generate_json(
+            SEGMENT_SYSTEM_PROMPT,
+            f"{header}: the scanned page is attached above.",
+            SEGMENT_SCHEMA,
+            effort="low",
+            attachments=content_blocks(page),
+        )
+    else:
+        text = clean_extracted_text(page.text)
+        if not text.strip():
+            return
+        result = llm.generate_json(
+            SEGMENT_SYSTEM_PROMPT, f"{header}:\n\n{text}", SEGMENT_SCHEMA, effort="low"
+        )
     for article in result["articles"]:
         if article["kind"] not in INGESTED_KINDS or len(article["text"]) < MIN_ARTICLE_CHARS:
             continue

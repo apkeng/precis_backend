@@ -1,3 +1,4 @@
+from app.pdf_processor import Page
 from app import auth, editions, store
 from app.config import settings
 from tests.conftest import KEY_HEADERS
@@ -43,7 +44,7 @@ def test_sign_in_unconfigured_is_rejected(client, monkeypatch):
 
 def test_admin_uploads_edition_and_sees_progress_and_articles(client, fake_claude, signed_in, monkeypatch):
     fake_claude.force_new = True
-    monkeypatch.setattr(editions, "extract_text_by_page", lambda b: ["Monsoon ends below normal.", "Court ruling on the Governor's Bills."])
+    monkeypatch.setattr(editions, "load_pages", lambda b: [Page(text="Monsoon ends below normal."), Page(text="Court ruling on the Governor's Bills.")])
     admin = signed_in("yadu@apokryfon.com")
 
     assert client.post("/editions/pdf", files=PDF, data=FORM, headers=signed_in("a@gmail.com")).status_code == 403
@@ -67,7 +68,7 @@ def test_admin_uploads_edition_and_sees_progress_and_articles(client, fake_claud
 
 
 def test_key_uploads_are_attributed_to_the_key(client, fake_claude, monkeypatch):
-    monkeypatch.setattr(editions, "extract_text_by_page", lambda b: ["Text."])
+    monkeypatch.setattr(editions, "load_pages", lambda b: [Page(text="Text.")])
     resp = client.post("/editions/pdf", files=PDF, data=FORM, headers=KEY_HEADERS)
     assert store.get_edition(resp.json()["id"]).uploaded_by == "api-key"
 

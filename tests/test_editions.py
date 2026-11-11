@@ -1,4 +1,5 @@
 from app import editions, store
+from app.pdf_processor import Page
 from app.text_cleanup import clean_extracted_text
 from tests.conftest import KEY_HEADERS
 
@@ -12,8 +13,8 @@ def test_edition_is_split_into_articles_and_ingested(client, fake_claude, monkey
     fake_claude.force_new = True
     monkeypatch.setattr(
         editions,
-        "extract_text_by_page",
-        lambda b: ["Monsoon ends 12.6% below normal, says IMD. Cyclone watch.", "", "Court on Governor's Bills."],
+        "load_pages",
+        lambda b: [Page(text=t) for t in ["Monsoon ends 12.6% below normal, says IMD. Cyclone watch.", "", "Court on Governor's Bills."]],
     )
     resp = client.post(
         "/editions/pdf",
@@ -39,12 +40,12 @@ def test_edition_is_split_into_articles_and_ingested(client, fake_claude, monkey
 def test_roundup_items_are_kept_as_separate_clippings(client, fake_claude, monkeypatch):
     fake_claude.force_new = True
     assert "News in Numbers" in editions.SEGMENT_SYSTEM_PROMPT
-    monkeypatch.setattr(editions, "extract_text_by_page", lambda b: ["News in Numbers page."])
+    monkeypatch.setattr(editions, "load_pages", lambda b: [Page(text="News in Numbers page.")])
     real = fake_claude.__call__
     item = "35 in per cent. The UN refugee agency has secured only $3 billion, or 35% of the $8.5 billion it needs for 2026, its chief said in Geneva on Monday. REUTERS"
     assert editions.MIN_ARTICLE_CHARS <= len(item) < 300
 
-    def roundup(system, prompt, schema, effort="medium"):
+    def roundup(system, prompt, schema, effort="medium", attachments=None):
         if "articles" in schema["properties"]:
             return {"articles": [
                 {"headline": "Share of 2026 funding received by UN refugee agency", "kind": "news", "text": item},
@@ -65,10 +66,10 @@ def test_roundup_items_are_kept_as_separate_clippings(client, fake_claude, monke
 
 
 def test_edition_page_failure_is_recorded_and_others_continue(client, fake_claude, monkeypatch):
-    monkeypatch.setattr(editions, "extract_text_by_page", lambda b: ["Page one text.", "Page two text."])
+    monkeypatch.setattr(editions, "load_pages", lambda b: [Page(text="Page one text."), Page(text="Page two text.")])
     real = fake_claude.__call__
 
-    def flaky(system, prompt, schema, effort="medium"):
+    def flaky(system, prompt, schema, effort="medium", attachments=None):
         if "articles" in schema["properties"] and "page 2:" in prompt:
             raise RuntimeError("segmenting failed")
         return real(system, prompt, schema, effort)
@@ -88,3 +89,78 @@ def test_edition_page_failure_is_recorded_and_others_continue(client, fake_claud
 def test_unknown_edition_is_404(client):
     assert client.get("/editions/nope", headers=KEY_HEADERS).status_code == 404
     assert client.get("/editions/nope").status_code == 401
+
+
+def test_scanned_edition_pages_are_sent_to_claude_as_images(client, fake_claude, monkeypatch):
+    import io
+
+    from PIL import Image
+
+    fake_claude.force_new = True
+    real = fake_claude.__call__
+    seen = []
+    story = "The Election Commission on Monday announced polling dates for five States. " * 4
+
+    def segment(system, prompt, schema, effort="medium", attachments=None):
+        if "articles" in schema["properties"]:
+            seen.append((prompt, attachments))
+            return {"articles": [{"headline": "Poll dates announced", "kind": "news", "text": story}]}
+        return real(system, prompt, schema, effort)
+
+    monkeypatch.setattr(editions.llm, "generate_json", segment)
+    buf = io.BytesIO()
+    Image.new("L", (1000, 1400), 230).save(buf, format="JPEG")
+    jpeg = buf.getvalue()
+    resp = client.post(
+        "/editions/pdf",
+        files=[("file", ("p1.jpg", jpeg, "image/jpeg")), ("file", ("p2.jpg", jpeg, "image/jpeg"))],
+        data={"paper": "Deccan Herald", "date": "2026-11-11"},
+        headers=KEY_HEADERS,
+    )
+    assert resp.status_code == 202, resp.text
+    body = client.get(f"/editions/{resp.json()['id']}", headers=KEY_HEADERS).json()
+    assert body["status"] == "ready" and body["pages"] == 2
+    assert [p.split(":")[0] for p, _ in seen] == ["Deccan Herald, 2026-11-11, page 1", "Deccan Herald, 2026-11-11, page 2"]
+    assert all(att and att[-1]["type"] == "image" for _, att in seen)
+    assert body["clippings"] == {"ready": 2}
+
+
+def test_non_document_upload_is_rejected(client):
+    resp = client.post(
+        "/editions/pdf",
+        files={"file": ("notes.txt", b"just some text", "text/plain")},
+        data={"paper": "The Hindu", "date": "2026-11-11"},
+        headers=KEY_HEADERS,
+    )
+    assert resp.status_code == 400
+
+
+def test_scanned_clipping_is_transcribed(client, fake_claude, monkeypatch):
+    import io
+
+    from PIL import Image
+
+    from app import ocr
+
+    real = fake_claude.__call__
+    story = "The Supreme Court on Tuesday reserved its verdict on the Governor's assent to Bills. " * 3
+
+    def transcribe(system, prompt, schema, effort="medium", attachments=None):
+        if system == ocr.TRANSCRIBE_SYSTEM_PROMPT:
+            assert attachments and attachments[-1]["type"] == "image"
+            return {"text": story}
+        return real(system, prompt, schema, effort)
+
+    monkeypatch.setattr(ocr.llm, "generate_json", transcribe)
+    buf = io.BytesIO()
+    Image.new("RGB", (900, 1200), "white").save(buf, format="PNG")
+    resp = client.post(
+        "/clippings/pdf",
+        files={"file": ("clip.png", buf.getvalue(), "image/png")},
+        data={"paper": "The Hindu", "date": "2026-11-11", "title": "SC reserves verdict"},
+        headers=KEY_HEADERS,
+    )
+    assert resp.status_code == 202, resp.text
+    clipping = store.get_clipping(resp.json()["id"])
+    assert clipping.status == "ready"
+    assert clipping.text.startswith("The Supreme Court on Tuesday")

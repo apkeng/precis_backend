@@ -21,7 +21,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app import analysis, mailer, payments, quiz, store
+from app import analysis, mailer, ocr, payments, quiz, store
 from app.auth import Caller, Reader, require_admin, require_ingest_access, require_quiz_access, require_reader
 from app.config import settings
 from app.editions import process_edition
@@ -29,7 +29,7 @@ from app.embeddings import LocalEmbeddingFunction
 from app.ingestion import process_clipping
 from app.llm import LLMGenerationError, SchemaValidationError
 from app.pregenerate import prepare_events
-from app.pdf_processor import extract_text_by_page
+from app.pdf_processor import EmptyPdfError, is_supported_upload, load_pages
 from app.text_cleanup import clean_extracted_text
 from app.schemas import (
     AccountOut,
@@ -197,9 +197,12 @@ def _process_and_prepare(clipping_id: str) -> None:
     prepare_events([store.get_clipping(clipping_id).event_id])
 
 
-def _ingest_pdf(clipping_id: str, pdf_bytes: bytes) -> None:
+def _ingest_pdf(clipping_id: str, uploads: list[bytes]) -> None:
     try:
-        text = clean_extracted_text("\n\n".join(extract_text_by_page(pdf_bytes)))
+        pages = load_pages(uploads)
+        text = clean_extracted_text("\n\n".join(t for t in map(ocr.page_text, pages) if t.strip()))
+        if not text.strip():
+            raise EmptyPdfError("No readable text found in this clipping, even on its scan.")
     except Exception as exc:  # noqa: BLE001 - surfaced through the clipping's status
         store.set_clipping_status(clipping_id, "failed", str(exc))
         return
@@ -207,23 +210,34 @@ def _ingest_pdf(clipping_id: str, pdf_bytes: bytes) -> None:
     _process_and_prepare(clipping_id)
 
 
+async def _read_uploads(files: list[UploadFile]) -> list[bytes]:
+    """Bytes of each upload; 400 unless every one is a PDF or a supported image.
+    Checked by content, not the declared type (phones and scanners vary)."""
+    uploads = [await f.read() for f in files]
+    if not uploads or not all(is_supported_upload(data) for data in uploads):
+        raise HTTPException(
+            status_code=400, detail="Upload a PDF, or scanned pages as JPEG, PNG, WEBP or TIFF images."
+        )
+    if len(uploads) > 1 and any(data.startswith(b"%PDF") for data in uploads):
+        raise HTTPException(status_code=400, detail="Upload one PDF, or several images - not both.")
+    return uploads
+
+
 @app.post(
     "/clippings/pdf", response_model=ClippingOut, status_code=202, dependencies=[Depends(require_ingest_access)]
 )
 async def ingest_clipping_pdf(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="Clipping PDF with a text layer."),
+    file: list[UploadFile] = File(..., description="Clipping PDF (text layer or scanned), or scan image(s)."),
     paper: str = Form(..., min_length=1),
     date_: str = Form(..., alias="date"),
     title: str = Form(..., min_length=1),
     page: int | None = Form(default=None),
 ) -> ClippingOut:
-    if file.content_type not in ("application/pdf", "application/octet-stream"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be a PDF.")
+    uploads = await _read_uploads(file)
     _date_param(date_, "date")
-    pdf_bytes = await file.read()
     clipping = store.create_clipping(paper, date_, page, title, "")
-    background_tasks.add_task(_ingest_pdf, clipping.id, pdf_bytes)
+    background_tasks.add_task(_ingest_pdf, clipping.id, uploads)
     return _clipping_out(clipping)
 
 
@@ -245,19 +259,20 @@ def _edition_out(edition: store.Edition) -> EditionOut:
 @app.post("/editions/pdf", response_model=EditionOut, status_code=202)
 async def ingest_edition(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="A whole day's e-paper PDF."),
+    file: list[UploadFile] = File(
+        ..., description="A whole day's e-paper PDF (text or scanned), or one scan image per page, in order."
+    ),
     paper: str = Form(..., min_length=1),
     date_: str = Form(..., alias="date"),
     caller: Caller = Depends(require_ingest_access),
 ) -> EditionOut:
-    """Split every page into articles and ingest each one. Poll
-    GET /editions/{id} for progress - a full edition takes a few minutes."""
-    if file.content_type not in ("application/pdf", "application/octet-stream"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be a PDF.")
+    """Split every page into articles and ingest each one. Scanned pages are
+    read by Claude vision. Poll GET /editions/{id} for progress - a full
+    edition takes a few minutes."""
+    uploads = await _read_uploads(file)
     _date_param(date_, "date")
-    pdf_bytes = await file.read()
     edition = store.create_edition(paper.strip(), date_, uploaded_by=caller.label)
-    background_tasks.add_task(process_edition, edition.id, pdf_bytes)
+    background_tasks.add_task(process_edition, edition.id, uploads)
     return _edition_out(edition)
 
 
